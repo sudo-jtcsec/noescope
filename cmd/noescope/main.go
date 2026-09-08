@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/sudo-jtcsec/noescope/internal/config"
+	"github.com/sudo-jtcsec/noescope/internal/repository"
 )
 
 var version = "0.0.1-dev"
@@ -77,9 +78,26 @@ func discoverCommand() *cobra.Command {
 
 			projectRoot := filepath.Dir(configPath)
 
+			sourcePath := filepath.Join(projectRoot, cfg.Source.Path)
+
+			repo, err := repository.Open(sourcePath)
+			if err != nil {
+				return err
+			}
+
+			repoInfo, err := repo.Info()
+			if err != nil {
+				return err
+			}
+
 			fmt.Printf("Noescope project: %s\n", cfg.Project.Name)
 			fmt.Printf("Project root:     %s\n", projectRoot)
-			fmt.Printf("Source path:      %s\n", cfg.Source.Path)
+			fmt.Printf("Source root:      %s\n", repoInfo.Root)
+			fmt.Printf("Git branch:       %s\n", repoInfo.Branch)
+			fmt.Printf("Git commit:       %s\n", repoInfo.Commit)
+			fmt.Printf("Git dirty:        %t\n", repoInfo.Dirty)
+			fmt.Printf("Files:            %d\n", repoInfo.FileCount)
+			fmt.Printf("Languages:        %v\n", repoInfo.Languages)
 			fmt.Printf("LLM endpoint:     %s\n", cfg.AI.BaseURL)
 			fmt.Printf("LLM model:        %s\n", cfg.AI.Model)
 
