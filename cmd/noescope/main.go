@@ -77,7 +77,6 @@ func discoverCommand() *cobra.Command {
 			}
 
 			projectRoot := filepath.Dir(configPath)
-
 			sourcePath := filepath.Join(projectRoot, cfg.Source.Path)
 
 			repo, err := repository.Open(sourcePath)
