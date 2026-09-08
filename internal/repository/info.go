@@ -116,6 +116,8 @@ func lineCount(path string) (int, error) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
 	count := 0
 
 	for scanner.Scan() {
