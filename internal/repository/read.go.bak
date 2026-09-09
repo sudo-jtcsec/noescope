@@ -6,8 +6,8 @@ import (
 	"os"
 )
 
-const DefaultReadLines = 150
-const MaxReadLines = 500
+const DefaultReadLines = 500
+const MaxReadLines = 2000
 
 type SourceLine struct {
 	Number int    `json:"number"`

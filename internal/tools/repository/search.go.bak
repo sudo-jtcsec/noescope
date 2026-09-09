@@ -66,8 +66,8 @@ func (t *SearchTool) Execute(
 ) (tools.Result, error) {
 	args := searchArgs{
 		Path:         ".",
-		MaxResults:   20,
-		ContextLines: 1,
+		MaxResults:   50,
+		ContextLines: 2,
 	}
 
 	if err := json.Unmarshal(raw, &args); err != nil {

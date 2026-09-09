@@ -1,0 +1,27 @@
+project:
+  name: my-app
+
+source:
+  path: .
+  ignore:
+    - .git/**
+    - vendor/**
+    - node_modules/**
+    - dist/**
+  deny: []
+
+application:
+  url: ""
+
+identities: []
+
+ai:
+  base_url: http://localhost:8001/v1
+  model: "qwen-deep"
+  api_key: ""
+
+discovery:
+  allowed_hosts: []
+  external_navigation: false
+  destructive_actions: false
+  max_pages: 500
