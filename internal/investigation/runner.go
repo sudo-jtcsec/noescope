@@ -49,8 +49,12 @@ func (r *Runner) Run(
 		budget.MaxToolCalls = 100
 	}
 
-	if budget.MaxResultRepairs == 0 {
-		budget.MaxResultRepairs = 2
+	if budget.MaxFormatRepairs == 0 {
+		budget.MaxFormatRepairs = 2
+	}
+
+	if budget.MaxSemanticRepairs == 0 {
+		budget.MaxSemanticRepairs = 2
 	}
 
 	if budget.FinalizeTurns == 0 {
@@ -73,15 +77,14 @@ func (r *Runner) Run(
 		task.ToolNames,
 	)
 
-	definitions = append(definitions, llm.ToolDefinition{
+	submitDefinition := llm.ToolDefinition{
 		Type: "function",
 		Function: llm.FunctionDefinition{
 			Name:        submitToolName,
 			Description: "Submit the final structured result for this investigation. Call this when the investigation is complete.",
 			Parameters:  task.SubmitSchema,
 		},
-	})
-
+	}
 	systemPrompt := `You are a Noescope repository investigation sub-agent.
 
 Your task is narrow and bounded. Investigate the requested objective using only the tools provided.
@@ -97,8 +100,8 @@ Rules:
 - Do not invent repository names, module paths, versions, routes, or technologies in Summary.
 - You have read-only repository access.
 - Do not describe unrelated application functionality.
-- When finished, you MUST call submit_investigation_result.
-- Do not finish with a normal prose response.`
+- Use repository tools to gather the evidence needed for the task.
+- Final result synthesis will happen in a separate structured-output phase.`
 
 	if task.Instructions != "" {
 		systemPrompt += "\n\nAdditional instructions:\n" + task.Instructions
@@ -146,53 +149,24 @@ Treat this as read-only context from a completed earlier investigation. Use it t
 	}
 
 	toolCalls := 0
-	repairs := 0
+	finalizationTurn := budget.MaxTurns - budget.FinalizeTurns + 1
 
-	for turn := 1; turn <= budget.MaxTurns; turn++ {
+	for turn := 1; turn < finalizationTurn; turn++ {
 		if r.Logf != nil {
 			r.Logf("[%s] model turn %d", task.ID, turn)
 		}
 
-		activeDefinitions := definitions
-
-		finalizationStart := budget.MaxTurns - budget.FinalizeTurns + 1
-		if turn >= finalizationStart {
-			// The investigation budget is nearly exhausted. Stop allowing
-			// additional repository exploration and require the model to
-			// synthesize its existing evidence into a result.
-			activeDefinitions = []llm.ToolDefinition{
-				{
-					Type: "function",
-					Function: llm.FunctionDefinition{
-						Name:        submitToolName,
-						Description: "Submit the final structured result for this investigation.",
-						Parameters:  task.SubmitSchema,
-					},
-				},
-			}
-
-			messages = append(messages, llm.Message{
-				Role: "user",
-				Content: `The investigation phase is complete.
-
-Do not request any additional repository inspection.
-
-Using the evidence and observations already collected, synthesize the best supported result now.
-
-If something remains uncertain, put it in unresolved.
-
-You MUST call submit_investigation_result.`,
-			})
-
-			if r.Logf != nil {
-				r.Logf("[%s] finalization phase: submission required", task.ID)
-			}
-		}
-
-		requestMessages, compacted, beforeBytes, afterBytes := prepareMessages(
+		requestMessages, compacted, beforeBytes, afterBytes, err := prepareMessages(
 			messages,
 			contextMessageByteBudget,
 		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"prepare task %s context: %w",
+				task.ID,
+				err,
+			)
+		}
 
 		if compacted && r.Logf != nil {
 			r.Logf(
@@ -203,11 +177,7 @@ You MUST call submit_investigation_result.`,
 			)
 		}
 
-		response, err := r.LLM.Chat(
-			ctx,
-			requestMessages,
-			activeDefinitions,
-		)
+		response, err := r.LLM.Chat(ctx, requestMessages, definitions)
 		if err != nil {
 			return nil, err
 		}
@@ -216,18 +186,9 @@ You MUST call submit_investigation_result.`,
 		messages = append(messages, message)
 
 		if len(message.ToolCalls) == 0 {
-			repairs++
-
-			if repairs > budget.MaxResultRepairs {
-				return nil, fmt.Errorf(
-					"task %s ended without submitting a result",
-					task.ID,
-				)
-			}
-
 			messages = append(messages, llm.Message{
 				Role:    "user",
-				Content: "You must continue the investigation or call submit_investigation_result with the final structured result.",
+				Content: "Continue the bounded investigation using the available repository tools. Final result synthesis will happen separately.",
 			})
 
 			continue
@@ -249,112 +210,6 @@ You MUST call submit_investigation_result.`,
 					task.ID,
 					call.Function.Name,
 				)
-			}
-
-			if call.Function.Name == submitToolName {
-				var result Result
-
-				if err := json.Unmarshal(
-					[]byte(call.Function.Arguments),
-					&result,
-				); err != nil {
-					submissionErr := fmt.Errorf(
-						"invalid result JSON: %w",
-						err,
-					)
-					repairs++
-
-					if repairs > budget.MaxResultRepairs {
-						return nil, fmt.Errorf(
-							"invalid submitted result: %w",
-							err,
-						)
-					}
-
-					r.logResultRepair(task.ID, submissionErr)
-					errorPayload, _ := json.Marshal(map[string]string{
-						"error": submissionErr.Error(),
-					})
-
-					messages = append(messages, llm.Message{
-						Role:       "tool",
-						ToolCallID: call.ID,
-						Content:    string(errorPayload),
-					})
-
-					continue
-				}
-
-				if result.Status == "" ||
-					result.Summary == "" ||
-					len(result.Findings) == 0 {
-					submissionErr := errors.New(
-						"status, summary, and findings are required",
-					)
-					repairs++
-
-					if repairs > budget.MaxResultRepairs {
-						return nil, fmt.Errorf(
-							"task %s exceeded result repair limit",
-							task.ID,
-						)
-					}
-
-					r.logResultRepair(task.ID, submissionErr)
-					errorPayload, _ := json.Marshal(map[string]string{
-						"error": submissionErr.Error(),
-					})
-
-					messages = append(messages, llm.Message{
-						Role:       "tool",
-						ToolCallID: call.ID,
-						Content:    string(errorPayload),
-					})
-
-					continue
-				}
-
-				// Validate common claim fields and evidence references.
-				submissionErr := validateClaims(
-					result.Claims,
-					r.Evidence,
-				)
-
-				if submissionErr == nil && task.ValidateResult != nil {
-					submissionErr = task.ValidateResult(
-						&result,
-						r.Evidence,
-					)
-				}
-
-				if submissionErr != nil {
-					repairs++
-
-					if repairs > budget.MaxResultRepairs {
-						return nil, fmt.Errorf(
-							"task %s exceeded result repair limit: %w",
-							task.ID,
-							submissionErr,
-						)
-					}
-
-					r.logResultRepair(task.ID, submissionErr)
-
-					errorPayload, _ := json.Marshal(map[string]any{
-						"error":       submissionErr.Error(),
-						"instruction": "Correct the submitted result using only valid evidence IDs, then call submit_investigation_result again.",
-					})
-
-					messages = append(messages, llm.Message{
-						Role:       "tool",
-						ToolCallID: call.ID,
-						Content:    string(errorPayload),
-					})
-
-					continue
-				}
-
-				return &result, nil
 			}
 
 			rawArgs := json.RawMessage(call.Function.Arguments)
@@ -421,19 +276,480 @@ You MUST call submit_investigation_result.`,
 		}
 	}
 
-	return nil, fmt.Errorf(
-		"task %s exceeded maximum model turns",
-		task.ID,
+	if r.Logf != nil {
+		r.Logf("[%s] model turn %d", task.ID, finalizationTurn)
+		r.Logf("[%s] finalization phase", task.ID)
+	}
+	messages = append(messages, llm.Message{
+		Role: "user",
+		Content: `The investigation phase is complete. Do not request additional repository inspection.
+
+Using only the evidence and observations already collected, produce the best supported final result. Put meaningful uncertainty under unresolved. Return only the schema-constrained result.`,
+	})
+
+	return r.structuredFinalize(
+		ctx,
+		task,
+		messages,
+		submitDefinition,
+		budget,
 	)
 }
 
-func (r *Runner) logResultRepair(taskID string, err error) {
+type finalizationMode string
+
+const (
+	structuredFinalization finalizationMode = "structured"
+	legacyToolFinalization finalizationMode = "legacy_tool"
+)
+
+func (r *Runner) structuredFinalize(
+	ctx context.Context,
+	task Task,
+	messages []llm.Message,
+	submitDefinition llm.ToolDefinition,
+	budget Budget,
+) (*Result, error) {
+	requestMessages, compacted, beforeBytes, afterBytes, err := prepareMessages(
+		messages,
+		contextMessageByteBudget,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"prepare task %s finalization context: %w",
+			task.ID,
+			err,
+		)
+	}
+	r.logCompaction(task.ID, compacted, beforeBytes, afterBytes)
+	if r.Logf != nil {
+		r.Logf("[%s] structured finalization", task.ID)
+	}
+
+	response, err := r.LLM.StructuredChat(
+		ctx,
+		requestMessages,
+		"investigation_result",
+		task.SubmitSchema,
+	)
+	if err != nil {
+		if llm.IsResponseFormatUnsupported(err) {
+			if r.Logf != nil {
+				r.Logf(
+					"[%s] structured output unsupported; using legacy submit fallback",
+					task.ID,
+				)
+			}
+			return r.legacyFinalize(
+				ctx,
+				task,
+				messages,
+				submitDefinition,
+				budget,
+			)
+		}
+		return nil, err
+	}
+
+	message := response.Choices[0].Message
+	messages = append(messages, message)
+	if r.Logf != nil {
+		r.Logf("[%s] structured result received", task.ID)
+	}
+	result, submissionErr := r.validateSubmissionJSON(
+		task,
+		json.RawMessage(message.Content),
+	)
+	if submissionErr == nil {
+		return result, nil
+	}
+
+	r.logSubmissionError(task.ID, submissionErr)
+	messages = appendStructuredSubmissionError(messages, submissionErr)
+	return r.repairResult(
+		ctx,
+		task,
+		messages,
+		submitDefinition,
+		structuredFinalization,
+		budget.MaxFormatRepairs,
+		budget.MaxSemanticRepairs,
+		submissionErr,
+	)
+}
+
+func (r *Runner) legacyFinalize(
+	ctx context.Context,
+	task Task,
+	messages []llm.Message,
+	submitDefinition llm.ToolDefinition,
+	budget Budget,
+) (*Result, error) {
+	messages = append(messages, llm.Message{
+		Role: "user",
+		Content: "The provider does not support JSON Schema response formatting. " +
+			"Call submit_investigation_result exactly once with the final result.",
+	})
+	requestMessages, compacted, beforeBytes, afterBytes, err := prepareMessages(
+		messages,
+		contextMessageByteBudget,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"prepare task %s legacy finalization context: %w",
+			task.ID,
+			err,
+		)
+	}
+	r.logCompaction(task.ID, compacted, beforeBytes, afterBytes)
+
+	response, err := r.LLM.ChatWithToolChoice(
+		ctx,
+		requestMessages,
+		[]llm.ToolDefinition{submitDefinition},
+		llm.ForceTool(submitToolName),
+	)
+	if err != nil {
+		return nil, err
+	}
+	message := response.Choices[0].Message
+	messages = append(messages, message)
+	result, submissionErr := r.validateLegacyMessage(task, message)
+	if submissionErr == nil {
+		return result, nil
+	}
+
+	r.logSubmissionError(task.ID, submissionErr)
+	messages = appendLegacySubmissionError(messages, message, submissionErr)
+	return r.repairResult(
+		ctx,
+		task,
+		messages,
+		submitDefinition,
+		legacyToolFinalization,
+		budget.MaxFormatRepairs,
+		budget.MaxSemanticRepairs,
+		submissionErr,
+	)
+}
+
+func (r *Runner) logCompaction(
+	taskID string,
+	compacted bool,
+	beforeBytes int,
+	afterBytes int,
+) {
+	if compacted && r.Logf != nil {
+		r.Logf(
+			"[%s] context compacted: %d -> %d bytes",
+			taskID,
+			beforeBytes,
+			afterBytes,
+		)
+	}
+}
+
+func (r *Runner) validateSubmission(
+	task Task,
+	call llm.ToolCall,
+) (*Result, error) {
+	return r.validateSubmissionJSON(
+		task,
+		json.RawMessage(call.Function.Arguments),
+	)
+}
+
+func (r *Runner) validateSubmissionJSON(
+	task Task,
+	raw json.RawMessage,
+) (*Result, error) {
+	result, shape, err := parseSubmittedResult(raw)
+	if err != nil {
+		r.logRejectedSubmissionShape(task.ID, shape)
+		return nil, NewSubmissionFormatError(err)
+	}
+
+	if result.Status == "" || result.Summary == "" || len(result.Findings) == 0 {
+		r.logRejectedSubmissionShape(task.ID, shape)
+		return nil, NewSubmissionFormatError(errors.New(
+			"status, summary, and findings are required",
+		))
+	}
+
+	normalizedFindings, normalized, err := NormalizeFindings(result.Findings)
+	if err != nil {
+		return nil, NewSubmissionFormatError(err)
+	}
+	result.Findings = normalizedFindings
+	if normalized && r.Logf != nil {
+		r.Logf(
+			"[%s] normalized double-encoded findings object",
+			task.ID,
+		)
+	}
+
+	if err := validateClaims(result.Claims, r.Evidence); err != nil {
+		return nil, NewSubmissionValidationError(err)
+	}
+
+	if task.ValidateResult != nil {
+		if err := task.ValidateResult(result, r.Evidence); err != nil {
+			if IsSubmissionFormatError(err) {
+				return nil, err
+			}
+			return nil, NewSubmissionValidationError(err)
+		}
+	}
+
+	return result, nil
+}
+
+func (r *Runner) validateLegacyMessage(
+	task Task,
+	message llm.Message,
+) (*Result, error) {
+	if len(message.ToolCalls) != 1 ||
+		message.ToolCalls[0].Function.Name != submitToolName {
+		return nil, NewSubmissionFormatError(errors.New(
+			"legacy finalization must call only submit_investigation_result exactly once",
+		))
+	}
+	return r.validateSubmission(task, message.ToolCalls[0])
+}
+
+func (r *Runner) logRejectedSubmissionShape(taskID string, shape JSONShape) {
 	if r.Logf == nil {
 		return
 	}
 
-	r.Logf("[%s] result rejected: %v", taskID, err)
-	r.Logf("[%s] requesting result repair", taskID)
+	r.Logf(
+		"[%s] rejected submission shape: %s",
+		taskID,
+		shape.Summary(),
+	)
+	if fields := shape.FieldSummary(); fields != "" {
+		r.Logf("[%s] submission fields: %s", taskID, fields)
+	}
+}
+
+func (r *Runner) repairResult(
+	ctx context.Context,
+	task Task,
+	messages []llm.Message,
+	submitDefinition llm.ToolDefinition,
+	mode finalizationMode,
+	maxFormatRepairs int,
+	maxSemanticRepairs int,
+	initialErr error,
+) (*Result, error) {
+	lastErr := initialErr
+	formatRepairs := 0
+	semanticRepairs := 0
+
+	for {
+		formatError := IsSubmissionFormatError(lastErr)
+		var attempt int
+		var maximum int
+		var repairKind string
+		if formatError {
+			if formatRepairs >= maxFormatRepairs {
+				return nil, fmt.Errorf(
+					"task %s exceeded format repair limit: %w",
+					task.ID,
+					lastErr,
+				)
+			}
+			formatRepairs++
+			attempt = formatRepairs
+			maximum = maxFormatRepairs
+			repairKind = "format"
+		} else {
+			if semanticRepairs >= maxSemanticRepairs {
+				return nil, fmt.Errorf(
+					"task %s exceeded semantic repair limit: %w",
+					task.ID,
+					lastErr,
+				)
+			}
+			semanticRepairs++
+			attempt = semanticRepairs
+			maximum = maxSemanticRepairs
+			repairKind = "semantic"
+		}
+
+		if r.Logf != nil {
+			r.Logf(
+				"[%s] %s repair attempt %d/%d",
+				task.ID,
+				repairKind,
+				attempt,
+				maximum,
+			)
+		}
+
+		requestMessages, compacted, beforeBytes, afterBytes, err := prepareRepairMessages(
+			messages,
+			contextMessageByteBudget,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"prepare task %s repair context: %w",
+				task.ID,
+				err,
+			)
+		}
+		r.logCompaction(task.ID, compacted, beforeBytes, afterBytes)
+
+		var message llm.Message
+		var result *Result
+		var submissionErr error
+		if mode == structuredFinalization {
+			response, requestErr := r.LLM.StructuredChat(
+				ctx,
+				requestMessages,
+				"investigation_result",
+				task.SubmitSchema,
+			)
+			if requestErr != nil {
+				if llm.IsResponseFormatUnsupported(requestErr) {
+					if formatError {
+						formatRepairs--
+					} else {
+						semanticRepairs--
+					}
+					mode = legacyToolFinalization
+					messages = append(messages, llm.Message{
+						Role: "user",
+						Content: "The provider does not support JSON Schema response formatting. " +
+							"Call submit_investigation_result exactly once with the corrected result.",
+					})
+					if r.Logf != nil {
+						r.Logf(
+							"[%s] structured output unsupported; using legacy submit fallback",
+							task.ID,
+						)
+					}
+					continue
+				}
+				return nil, requestErr
+			}
+			message = response.Choices[0].Message
+			messages = append(messages, message)
+			if r.Logf != nil {
+				r.Logf("[%s] structured result received", task.ID)
+			}
+			result, submissionErr = r.validateSubmissionJSON(
+				task,
+				json.RawMessage(message.Content),
+			)
+		} else {
+			response, requestErr := r.LLM.ChatWithToolChoice(
+				ctx,
+				requestMessages,
+				[]llm.ToolDefinition{submitDefinition},
+				llm.ForceTool(submitToolName),
+			)
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			message = response.Choices[0].Message
+			messages = append(messages, message)
+			result, submissionErr = r.validateLegacyMessage(task, message)
+		}
+		if submissionErr == nil {
+			return result, nil
+		}
+
+		lastErr = submissionErr
+		r.logSubmissionError(task.ID, submissionErr)
+		if mode == structuredFinalization {
+			messages = appendStructuredSubmissionError(messages, submissionErr)
+		} else {
+			messages = appendLegacySubmissionError(
+				messages,
+				message,
+				submissionErr,
+			)
+		}
+	}
+}
+
+func appendSubmissionError(
+	messages []llm.Message,
+	toolCallID string,
+	err error,
+) []llm.Message {
+	payload, _ := json.Marshal(struct {
+		Error       string `json:"error"`
+		Instruction string `json:"instruction"`
+	}{
+		Error:       err.Error(),
+		Instruction: legacyRepairInstruction(err),
+	})
+
+	return append(messages, llm.Message{
+		Role:       "tool",
+		ToolCallID: toolCallID,
+		Content:    string(payload),
+	})
+}
+
+func appendStructuredSubmissionError(
+	messages []llm.Message,
+	err error,
+) []llm.Message {
+	return append(messages, llm.Message{
+		Role:    "user",
+		Content: structuredRepairInstruction(err),
+	})
+}
+
+func appendLegacySubmissionError(
+	messages []llm.Message,
+	message llm.Message,
+	err error,
+) []llm.Message {
+	if len(message.ToolCalls) == 0 {
+		return append(messages, llm.Message{
+			Role:    "user",
+			Content: legacyRepairInstruction(err),
+		})
+	}
+	for _, call := range message.ToolCalls {
+		messages = appendSubmissionError(messages, call.ID, err)
+	}
+	return messages
+}
+
+func structuredRepairInstruction(err error) string {
+	if IsSubmissionFormatError(err) {
+		return "The submitted result is structurally invalid. Correct only the " +
+			"JSON/result structure. Do not add new findings or investigate further. " +
+			"Return only the corrected schema-constrained result. " +
+			"Format error: " + err.Error()
+	}
+
+	return "The submitted structured result failed validation. Correct or " +
+		"remove unsupported findings using only existing evidence. Do not " +
+		"investigate further. Return only the corrected schema-constrained result. " +
+		"Validation error: " + err.Error()
+}
+
+func legacyRepairInstruction(err error) string {
+	return structuredRepairInstruction(err) +
+		" Call submit_investigation_result exactly once with the corrected result."
+}
+
+func (r *Runner) logSubmissionError(taskID string, err error) {
+	if r.Logf == nil {
+		return
+	}
+
+	if IsSubmissionFormatError(err) {
+		r.Logf("[%s] format error: %v", taskID, err)
+		return
+	}
+	r.Logf("[%s] validation error: %v", taskID, err)
 }
 
 func validateClaims(

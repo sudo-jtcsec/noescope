@@ -71,11 +71,16 @@ func initCommand() *cobra.Command {
 }
 
 func discoverCommand() *cobra.Command {
-	return &cobra.Command{
+	var throughName string
+	command := &cobra.Command{
 		Use:   "discover",
 		Short: "Discover and document application functionality",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+			through, err := discovery.ParseThrough(throughName)
+			if err != nil {
+				return err
+			}
 
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -167,12 +172,21 @@ func discoverCommand() *cobra.Command {
 				currentRun.ID,
 			)
 
-			return discovery.Run(
+			return discovery.RunThrough(
 				ctx,
 				runner,
 				currentRun.Root,
 				os.Stdout,
+				through,
 			)
 		},
 	}
+	command.Flags().StringVar(
+		&throughName,
+		"through",
+		"",
+		"run discovery through a stage (architecture, authentication, authorization, entities, surface)",
+	)
+
+	return command
 }

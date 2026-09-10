@@ -36,6 +36,51 @@ func (c *Client) Chat(
 	messages []Message,
 	tools []ToolDefinition,
 ) (*ChatResponse, error) {
+	var toolChoice any
+	if len(tools) > 0 {
+		toolChoice = "auto"
+	}
+
+	return c.chat(ctx, messages, tools, toolChoice, nil)
+}
+
+func (c *Client) ChatWithToolChoice(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDefinition,
+	toolChoice ToolChoice,
+) (*ChatResponse, error) {
+	return c.chat(ctx, messages, tools, toolChoice, nil)
+}
+
+func (c *Client) StructuredChat(
+	ctx context.Context,
+	messages []Message,
+	schemaName string,
+	schema json.RawMessage,
+) (*ChatResponse, error) {
+	return c.chat(
+		ctx,
+		messages,
+		nil,
+		nil,
+		&ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: JSONSchemaResponse{
+				Name:   schemaName,
+				Schema: schema,
+			},
+		},
+	)
+}
+
+func (c *Client) chat(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDefinition,
+	toolChoice any,
+	responseFormat *ResponseFormat,
+) (*ChatResponse, error) {
 	if c.BaseURL == "" {
 		return nil, fmt.Errorf("LLM base URL is required")
 	}
@@ -45,14 +90,12 @@ func (c *Client) Chat(
 	}
 
 	requestBody := ChatRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		Tools:       tools,
-		Temperature: 0.1,
-	}
-
-	if len(tools) > 0 {
-		requestBody.ToolChoice = "auto"
+		Model:          c.Model,
+		Messages:       messages,
+		Tools:          tools,
+		ToolChoice:     toolChoice,
+		ResponseFormat: responseFormat,
+		Temperature:    0.1,
 	}
 
 	payload, err := json.Marshal(requestBody)
@@ -94,11 +137,13 @@ func (c *Client) Chat(
 
 		if err := json.Unmarshal(body, &apiErr); err == nil &&
 			apiErr.Error.Message != "" {
-			return nil, fmt.Errorf(
-				"LLM API returned %s: %s",
-				resp.Status,
-				apiErr.Error.Message,
-			)
+			return nil, &RequestError{
+				StatusCode: resp.StatusCode,
+				Status:     resp.Status,
+				Message:    apiErr.Error.Message,
+				Type:       apiErr.Error.Type,
+				Code:       fmt.Sprint(apiErr.Error.Code),
+			}
 		}
 
 		return nil, fmt.Errorf(

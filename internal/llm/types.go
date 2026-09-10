@@ -32,11 +32,40 @@ type FunctionDefinition struct {
 }
 
 type ChatRequest struct {
-	Model       string           `json:"model"`
-	Messages    []Message        `json:"messages"`
-	Tools       []ToolDefinition `json:"tools,omitempty"`
-	ToolChoice  interface{}      `json:"tool_choice,omitempty"`
-	Temperature float64          `json:"temperature"`
+	Model          string           `json:"model"`
+	Messages       []Message        `json:"messages"`
+	Tools          []ToolDefinition `json:"tools,omitempty"`
+	ToolChoice     interface{}      `json:"tool_choice,omitempty"`
+	ResponseFormat *ResponseFormat  `json:"response_format,omitempty"`
+	Temperature    float64          `json:"temperature"`
+}
+
+type ResponseFormat struct {
+	Type       string             `json:"type"`
+	JSONSchema JSONSchemaResponse `json:"json_schema"`
+}
+
+type JSONSchemaResponse struct {
+	Name   string          `json:"name"`
+	Schema json.RawMessage `json:"schema"`
+}
+
+type ToolChoice struct {
+	Type     string             `json:"type"`
+	Function ToolChoiceFunction `json:"function"`
+}
+
+type ToolChoiceFunction struct {
+	Name string `json:"name"`
+}
+
+func ForceTool(name string) ToolChoice {
+	return ToolChoice{
+		Type: "function",
+		Function: ToolChoiceFunction{
+			Name: name,
+		},
+	}
 }
 
 type ChatResponse struct {

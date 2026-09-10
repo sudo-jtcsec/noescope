@@ -64,7 +64,8 @@ var submitSchema = json.RawMessage(`{
                   "name": {"type": "string"},
                   "storage": {"type": "string"}
                 },
-                "required": ["type"]
+                "required": ["type"],
+                "additionalProperties": false
               },
               "established_by": {
                 "type": "array",
@@ -83,7 +84,8 @@ var submitSchema = json.RawMessage(`{
                   },
                   "behavior": {"type": "string"}
                 },
-                "required": ["entrypoints", "behavior"]
+                "required": ["entrypoints", "behavior"],
+                "additionalProperties": false
               },
               "source_components": {
                 "type": "array",
@@ -109,7 +111,8 @@ var submitSchema = json.RawMessage(`{
               "source_components",
               "confidence",
               "evidence_ids"
-            ]
+            ],
+            "additionalProperties": false
           }
         }
       },
@@ -118,7 +121,8 @@ var submitSchema = json.RawMessage(`{
         "confidence",
         "evidence_ids",
         "mechanisms"
-      ]
+      ],
+      "additionalProperties": false
     },
     "claims": {
       "type": "array",
@@ -142,7 +146,8 @@ var submitSchema = json.RawMessage(`{
           "statement",
           "confidence",
           "evidence_ids"
-        ]
+        ],
+        "additionalProperties": false
       }
     },
     "unresolved": {
@@ -159,11 +164,13 @@ var submitSchema = json.RawMessage(`{
             "items": {"type": "string"}
           }
         },
-        "required": ["question", "priority", "reason"]
+        "required": ["question", "priority", "reason"],
+        "additionalProperties": false
       }
     }
   },
-  "required": ["status", "summary", "findings"]
+  "required": ["status", "summary", "findings"],
+  "additionalProperties": false
 }`)
 
 var mechanismTypes = map[string]struct{}{
@@ -223,11 +230,12 @@ The top-level authentication conclusion and every authentication mechanism with 
 		ValidateResult: validateResult,
 
 		Budget: investigation.Budget{
-			MaxTurns:         15,
-			MaxToolCalls:     100,
-			MaxResultRepairs: 2,
-			FinalizeTurns:    2,
-			MaxDuration:      10 * time.Minute,
+			MaxTurns:           15,
+			MaxToolCalls:       100,
+			MaxFormatRepairs:   2,
+			MaxSemanticRepairs: 2,
+			FinalizeTurns:      2,
+			MaxDuration:        10 * time.Minute,
 		},
 	}
 }
@@ -245,88 +253,21 @@ func Run(
 		return nil, nil, err
 	}
 
-	var findings Findings
-
-	if err := json.Unmarshal(result.Findings, &findings); err != nil {
-		return nil, result, fmt.Errorf(
-			"parse authentication findings: %w",
-			err,
-		)
+	findings, err := decodeFindings(result.Findings)
+	if err != nil {
+		return nil, result, err
 	}
 
-	return &findings, result, nil
+	return findings, result, nil
 }
 
 func validateResult(
 	result *investigation.Result,
 	evidence investigation.EvidenceLookup,
 ) error {
-	var rawFindings map[string]json.RawMessage
-
-	if err := json.Unmarshal(result.Findings, &rawFindings); err != nil {
-		return fmt.Errorf("parse authentication findings: %w", err)
-	}
-
-	authenticationPresentJSON, ok := rawFindings["authentication_present"]
-	if !ok {
-		return fmt.Errorf("authentication_present is required")
-	}
-
-	var authenticationPresent *bool
-	if err := json.Unmarshal(
-		authenticationPresentJSON,
-		&authenticationPresent,
-	); err != nil {
-		return fmt.Errorf("parse authentication_present: %w", err)
-	}
-	if authenticationPresent == nil {
-		return fmt.Errorf("authentication_present is required")
-	}
-
-	confidenceJSON, ok := rawFindings["confidence"]
-	if !ok {
-		return fmt.Errorf("authentication confidence is required")
-	}
-
-	var confidence *float64
-	if err := json.Unmarshal(confidenceJSON, &confidence); err != nil {
-		return fmt.Errorf("parse authentication confidence: %w", err)
-	}
-	if confidence == nil {
-		return fmt.Errorf("authentication confidence is required")
-	}
-
-	evidenceIDsJSON, ok := rawFindings["evidence_ids"]
-	if !ok {
-		return fmt.Errorf("authentication evidence_ids array is required")
-	}
-
-	var evidenceIDs *[]string
-	if err := json.Unmarshal(evidenceIDsJSON, &evidenceIDs); err != nil {
-		return fmt.Errorf("parse authentication evidence_ids: %w", err)
-	}
-	if evidenceIDs == nil {
-		return fmt.Errorf("authentication evidence_ids array is required")
-	}
-
-	mechanismsJSON, ok := rawFindings["mechanisms"]
-	if !ok {
-		return fmt.Errorf("mechanisms array is required")
-	}
-
-	var mechanisms *[]Mechanism
-	if err := json.Unmarshal(mechanismsJSON, &mechanisms); err != nil {
-		return fmt.Errorf("parse authentication mechanisms: %w", err)
-	}
-	if mechanisms == nil {
-		return fmt.Errorf("mechanisms array is required")
-	}
-
-	findings := Findings{
-		AuthenticationPresent: *authenticationPresent,
-		Confidence:            *confidence,
-		EvidenceIDs:           *evidenceIDs,
-		Mechanisms:            *mechanisms,
+	findings, err := decodeFindings(result.Findings)
+	if err != nil {
+		return investigation.NewSubmissionFormatError(err)
 	}
 
 	if err := validateEvidence(
@@ -407,6 +348,154 @@ func validateResult(
 				)
 			}
 		}
+	}
+
+	return nil
+}
+
+func decodeFindings(data json.RawMessage) (*Findings, error) {
+	var raw struct {
+		AuthenticationPresent *bool           `json:"authentication_present"`
+		Confidence            *float64        `json:"confidence"`
+		EvidenceIDs           json.RawMessage `json:"evidence_ids"`
+		Mechanisms            json.RawMessage `json:"mechanisms"`
+	}
+	if err := investigation.DecodeObjectFindings(
+		data,
+		&raw,
+		"authentication findings",
+	); err != nil {
+		return nil, err
+	}
+
+	if raw.AuthenticationPresent == nil {
+		return nil, fmt.Errorf("authentication_present is required")
+	}
+	if raw.Confidence == nil {
+		return nil, fmt.Errorf("authentication confidence is required")
+	}
+	if err := requireJSONKind(
+		"authentication evidence_ids",
+		raw.EvidenceIDs,
+		"array",
+	); err != nil {
+		return nil, err
+	}
+	if err := requireJSONKind("mechanisms", raw.Mechanisms, "array"); err != nil {
+		return nil, err
+	}
+
+	var rawMechanisms []json.RawMessage
+	if err := json.Unmarshal(raw.Mechanisms, &rawMechanisms); err != nil {
+		return nil, fmt.Errorf("parse authentication mechanisms: %w", err)
+	}
+	if rawMechanisms == nil {
+		return nil, fmt.Errorf("mechanisms array is required")
+	}
+	for i, rawMechanism := range rawMechanisms {
+		path := fmt.Sprintf("mechanisms[%d]", i)
+		if err := requireJSONKind(path, rawMechanism, "object"); err != nil {
+			return nil, err
+		}
+
+		var fields struct {
+			LoginEntrypoints json.RawMessage `json:"login_entrypoints"`
+			CredentialFields json.RawMessage `json:"credential_fields"`
+			Session          json.RawMessage `json:"session"`
+			EstablishedBy    json.RawMessage `json:"established_by"`
+			CheckedBy        json.RawMessage `json:"checked_by"`
+			Logout           json.RawMessage `json:"logout"`
+			SourceComponents json.RawMessage `json:"source_components"`
+			EvidenceIDs      json.RawMessage `json:"evidence_ids"`
+		}
+		if err := investigation.DecodeObjectFindings(
+			rawMechanism,
+			&fields,
+			path,
+		); err != nil {
+			return nil, err
+		}
+
+		for _, field := range []struct {
+			name     string
+			data     json.RawMessage
+			required bool
+			kind     string
+		}{
+			{name: "session", data: fields.Session, kind: "object"},
+			{name: "logout", data: fields.Logout, kind: "object"},
+			{
+				name:     "login_entrypoints",
+				data:     fields.LoginEntrypoints,
+				required: true,
+				kind:     "array",
+			},
+			{
+				name:     "credential_fields",
+				data:     fields.CredentialFields,
+				required: true,
+				kind:     "array",
+			},
+			{
+				name:     "established_by",
+				data:     fields.EstablishedBy,
+				required: true,
+				kind:     "array",
+			},
+			{
+				name:     "checked_by",
+				data:     fields.CheckedBy,
+				required: true,
+				kind:     "array",
+			},
+			{
+				name:     "source_components",
+				data:     fields.SourceComponents,
+				required: true,
+				kind:     "array",
+			},
+			{
+				name:     "evidence_ids",
+				data:     fields.EvidenceIDs,
+				required: true,
+				kind:     "array",
+			},
+		} {
+			if !field.required && len(field.data) == 0 {
+				continue
+			}
+			if err := requireJSONKind(
+				path+"."+field.name,
+				field.data,
+				field.kind,
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	var findings Findings
+	if err := investigation.DecodeObjectFindings(
+		data,
+		&findings,
+		"authentication findings",
+	); err != nil {
+		return nil, err
+	}
+	if findings.EvidenceIDs == nil {
+		return nil, fmt.Errorf("authentication evidence_ids array is required")
+	}
+	if findings.Mechanisms == nil {
+		return nil, fmt.Errorf("mechanisms array is required")
+	}
+
+	return &findings, nil
+}
+
+func requireJSONKind(path string, data json.RawMessage, expected string) error {
+	actual := investigation.JSONValueKind(data)
+	if actual != expected {
+		return fmt.Errorf("%s: expected %s, got %s", path, expected, actual)
 	}
 
 	return nil

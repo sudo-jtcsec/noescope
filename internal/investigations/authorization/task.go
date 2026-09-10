@@ -317,11 +317,12 @@ The top-level authorization conclusion and every model, role, permission, role-p
 		ValidateResult: validateResult,
 
 		Budget: investigation.Budget{
-			MaxTurns:         15,
-			MaxToolCalls:     100,
-			MaxResultRepairs: 2,
-			FinalizeTurns:    2,
-			MaxDuration:      10 * time.Minute,
+			MaxTurns:           15,
+			MaxToolCalls:       100,
+			MaxFormatRepairs:   2,
+			MaxSemanticRepairs: 2,
+			FinalizeTurns:      2,
+			MaxDuration:        10 * time.Minute,
 		},
 	}
 }
@@ -339,15 +340,12 @@ func Run(
 		return nil, nil, err
 	}
 
-	var findings Findings
-	if err := json.Unmarshal(result.Findings, &findings); err != nil {
-		return nil, result, fmt.Errorf(
-			"parse authorization findings: %w",
-			err,
-		)
+	findings, err := decodeFindings(result.Findings)
+	if err != nil {
+		return nil, result, err
 	}
 
-	return &findings, result, nil
+	return findings, result, nil
 }
 
 func validateResult(
@@ -356,7 +354,7 @@ func validateResult(
 ) error {
 	findings, err := decodeFindings(result.Findings)
 	if err != nil {
-		return err
+		return investigation.NewSubmissionFormatError(err)
 	}
 
 	if err := validateEvidence(
@@ -555,65 +553,59 @@ func validateResult(
 }
 
 func decodeFindings(data json.RawMessage) (*Findings, error) {
-	var rawFindings map[string]json.RawMessage
-	if err := json.Unmarshal(data, &rawFindings); err != nil {
-		return nil, fmt.Errorf("parse authorization findings: %w", err)
+	var rawFindings struct {
+		AuthorizationPresent *bool           `json:"authorization_present"`
+		Confidence           *float64        `json:"confidence"`
+		EvidenceIDs          json.RawMessage `json:"evidence_ids"`
+		Model                json.RawMessage `json:"model"`
+		Roles                json.RawMessage `json:"roles"`
+		Permissions          json.RawMessage `json:"permissions"`
+		RolePermissions      json.RawMessage `json:"role_permissions"`
+		Enforcement          json.RawMessage `json:"enforcement"`
+	}
+	if err := investigation.DecodeObjectFindings(
+		data,
+		&rawFindings,
+		"authorization findings",
+	); err != nil {
+		return nil, err
 	}
 
-	presentJSON, ok := rawFindings["authorization_present"]
-	if !ok {
+	if rawFindings.AuthorizationPresent == nil {
 		return nil, fmt.Errorf("authorization_present is required")
 	}
-
-	var present *bool
-	if err := json.Unmarshal(presentJSON, &present); err != nil {
-		return nil, fmt.Errorf("parse authorization_present: %w", err)
-	}
-	if present == nil {
-		return nil, fmt.Errorf("authorization_present is required")
-	}
-
-	confidenceJSON, ok := rawFindings["confidence"]
-	if !ok {
-		return nil, fmt.Errorf("authorization confidence is required")
-	}
-
-	var confidence *float64
-	if err := json.Unmarshal(confidenceJSON, &confidence); err != nil {
-		return nil, fmt.Errorf("parse authorization confidence: %w", err)
-	}
-	if confidence == nil {
+	if rawFindings.Confidence == nil {
 		return nil, fmt.Errorf("authorization confidence is required")
 	}
 
 	evidenceIDs, err := decodeRequiredArray[string](
-		rawFindings,
+		rawFindings.EvidenceIDs,
 		"evidence_ids",
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	roles, err := decodeRequiredArray[Role](rawFindings, "roles")
+	roles, err := decodeRequiredArray[Role](rawFindings.Roles, "roles")
 	if err != nil {
 		return nil, err
 	}
 	permissions, err := decodeRequiredArray[Permission](
-		rawFindings,
+		rawFindings.Permissions,
 		"permissions",
 	)
 	if err != nil {
 		return nil, err
 	}
 	rolePermissions, err := decodeRequiredArray[RolePermission](
-		rawFindings,
+		rawFindings.RolePermissions,
 		"role_permissions",
 	)
 	if err != nil {
 		return nil, err
 	}
 	enforcement, err := decodeRequiredArray[Enforcement](
-		rawFindings,
+		rawFindings.Enforcement,
 		"enforcement",
 	)
 	if err != nil {
@@ -621,15 +613,15 @@ func decodeFindings(data json.RawMessage) (*Findings, error) {
 	}
 
 	var model *Model
-	if modelJSON, ok := rawFindings["model"]; ok {
-		if err := json.Unmarshal(modelJSON, &model); err != nil {
+	if len(rawFindings.Model) > 0 {
+		if err := json.Unmarshal(rawFindings.Model, &model); err != nil {
 			return nil, fmt.Errorf("parse authorization model: %w", err)
 		}
 	}
 
 	return &Findings{
-		AuthorizationPresent: *present,
-		Confidence:           *confidence,
+		AuthorizationPresent: *rawFindings.AuthorizationPresent,
+		Confidence:           *rawFindings.Confidence,
 		EvidenceIDs:          evidenceIDs,
 		Model:                model,
 		Roles:                roles,
@@ -640,11 +632,10 @@ func decodeFindings(data json.RawMessage) (*Findings, error) {
 }
 
 func decodeRequiredArray[T any](
-	rawFindings map[string]json.RawMessage,
+	data json.RawMessage,
 	name string,
 ) ([]T, error) {
-	data, ok := rawFindings[name]
-	if !ok {
+	if len(data) == 0 {
 		return nil, fmt.Errorf("%s array is required", name)
 	}
 

@@ -13,6 +13,7 @@ import (
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authentication"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authorization"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/entities"
+	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
 )
 
 func Run(
@@ -21,11 +22,26 @@ func Run(
 	runRoot string,
 	out io.Writer,
 ) error {
+	return RunThrough(ctx, runner, runRoot, out, StageSurface)
+}
+
+func RunThrough(
+	ctx context.Context,
+	runner *investigation.Runner,
+	runRoot string,
+	out io.Writer,
+	through Stage,
+) error {
 	if out == nil {
 		out = io.Discard
 	}
+	totalStages := through.Count()
+	if totalStages == 0 {
+		return fmt.Errorf("invalid discovery through stage %q", through)
+	}
 
-	fmt.Fprintln(out, "[1/4] Architecture Discovery")
+	fmt.Fprintf(out, "[1/%d] Architecture Discovery\n", totalStages)
+	fmt.Fprintln(out, "[architecture] prior context: 0 bytes")
 
 	architectureFindings, architectureResult, err := architecture.Run(
 		ctx,
@@ -49,20 +65,24 @@ func Run(
 		architectureResult.Summary,
 		architecturePath,
 	)
+	if through == StageArchitecture {
+		return nil
+	}
 
-	authenticationContext, err := marshalAuthenticationContext(
+	authenticationContext, err := buildAuthenticationContext(
 		architectureFindings,
 	)
 	if err != nil {
 		return fmt.Errorf("marshal authentication context: %w", err)
 	}
 
-	fmt.Fprintln(out, "\n[2/4] Authentication Discovery")
+	fmt.Fprintf(out, "\n[2/%d] Authentication Discovery\n", totalStages)
+	logContextProjection(out, "authentication", authenticationContext)
 
 	authenticationFindings, authenticationResult, err := authentication.Run(
 		ctx,
 		runner,
-		authenticationContext,
+		authenticationContext.Data,
 	)
 	if err != nil {
 		return fmt.Errorf("authentication discovery: %w", err)
@@ -82,8 +102,11 @@ func Run(
 		authenticationResult.Summary,
 		authenticationPath,
 	)
+	if through == StageAuthentication {
+		return nil
+	}
 
-	authorizationContext, err := marshalAuthorizationContext(
+	authorizationContext, err := buildAuthorizationContext(
 		architectureFindings,
 		authenticationFindings,
 	)
@@ -91,12 +114,13 @@ func Run(
 		return fmt.Errorf("marshal authorization context: %w", err)
 	}
 
-	fmt.Fprintln(out, "\n[3/4] Authorization Discovery")
+	fmt.Fprintf(out, "\n[3/%d] Authorization Discovery\n", totalStages)
+	logContextProjection(out, "authorization", authorizationContext)
 
 	authorizationFindings, authorizationResult, err := authorization.Run(
 		ctx,
 		runner,
-		authorizationContext,
+		authorizationContext.Data,
 	)
 	if err != nil {
 		return fmt.Errorf("authorization discovery: %w", err)
@@ -116,8 +140,11 @@ func Run(
 		authorizationResult.Summary,
 		authorizationPath,
 	)
+	if through == StageAuthorization {
+		return nil
+	}
 
-	entitiesContext, err := marshalEntitiesContext(
+	entitiesContext, err := buildEntitiesContext(
 		architectureFindings,
 		authenticationFindings,
 		authorizationFindings,
@@ -126,12 +153,13 @@ func Run(
 		return fmt.Errorf("marshal entity context: %w", err)
 	}
 
-	fmt.Fprintln(out, "\n[4/4] Domain Entity Discovery")
+	fmt.Fprintf(out, "\n[4/%d] Domain Entity Discovery\n", totalStages)
+	logContextProjection(out, "entities", entitiesContext)
 
 	entityFindings, entityResult, err := entities.Run(
 		ctx,
 		runner,
-		entitiesContext,
+		entitiesContext.Data,
 	)
 	if err != nil {
 		return fmt.Errorf("domain entity discovery: %w", err)
@@ -152,46 +180,51 @@ func Run(
 		len(entityFindings.Entities),
 		entitiesPath,
 	)
+	if through == StageEntities {
+		return nil
+	}
+
+	surfaceContext, err := buildSurfaceContext(
+		architectureFindings,
+		authenticationFindings,
+		authorizationFindings,
+		entityFindings,
+	)
+	if err != nil {
+		return fmt.Errorf("marshal technical surface context: %w", err)
+	}
+
+	fmt.Fprintf(out, "\n[5/%d] Technical Surface Discovery\n", totalStages)
+	logContextProjection(out, "surface", surfaceContext)
+
+	surfaceFindings, surfaceResult, err := surface.Run(
+		ctx,
+		runner,
+		surfaceContext.Data,
+		authorizationFindings,
+		entityFindings,
+	)
+	if err != nil {
+		return fmt.Errorf("technical surface discovery: %w", err)
+	}
+
+	surfacePath := outputPath(runRoot, "surface.json")
+	if err := writeResult(
+		surfacePath,
+		surfaceResult,
+		surfaceFindings,
+	); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(
+		out,
+		"\nTechnical surface discovery complete.\nDiscovered %d interfaces.\n\nWritten to:\n%s\n",
+		len(surfaceFindings.Interfaces),
+		surfacePath,
+	)
 
 	return nil
-}
-
-// Context builders intentionally accept only validated structured findings.
-// Investigation summaries are narrative-only and never become downstream
-// canonical context.
-func marshalAuthenticationContext(
-	findings *architecture.Findings,
-) (json.RawMessage, error) {
-	return json.Marshal(findings)
-}
-
-func marshalAuthorizationContext(
-	architectureFindings *architecture.Findings,
-	authenticationFindings *authentication.Findings,
-) (json.RawMessage, error) {
-	return json.Marshal(struct {
-		Architecture   *architecture.Findings   `json:"architecture"`
-		Authentication *authentication.Findings `json:"authentication"`
-	}{
-		Architecture:   architectureFindings,
-		Authentication: authenticationFindings,
-	})
-}
-
-func marshalEntitiesContext(
-	architectureFindings *architecture.Findings,
-	authenticationFindings *authentication.Findings,
-	authorizationFindings *authorization.Findings,
-) (json.RawMessage, error) {
-	return json.Marshal(struct {
-		Architecture   *architecture.Findings   `json:"architecture"`
-		Authentication *authentication.Findings `json:"authentication"`
-		Authorization  *authorization.Findings  `json:"authorization"`
-	}{
-		Architecture:   architectureFindings,
-		Authentication: authenticationFindings,
-		Authorization:  authorizationFindings,
-	})
 }
 
 func writeResult(

@@ -20,6 +20,22 @@ func (e testEvidence) Exists(id string) bool {
 	return e[id]
 }
 
+func TestValidateResultRejectsStringifiedAuthorizationFindings(t *testing.T) {
+	result := &investigation.Result{
+		Status:   "completed",
+		Summary:  "test result",
+		Findings: json.RawMessage(`"{\"authorization_present\":false}"`),
+	}
+
+	err := validateResult(result, testEvidence{})
+	if err == nil || !strings.Contains(
+		err.Error(),
+		"authorization findings: expected object, got string",
+	) {
+		t.Fatalf("expected useful stringified findings error, got %v", err)
+	}
+}
+
 func TestValidateResultAcceptsNoAuthorization(t *testing.T) {
 	result := resultWithFindings(t, Findings{
 		AuthorizationPresent: false,
@@ -250,17 +266,8 @@ func TestAuthorizationPromptIncludesBothPriorFindingsWithoutChatHistory(
 				Choices: []llm.Choice{
 					{
 						Message: llm.Message{
-							Role: "assistant",
-							ToolCalls: []llm.ToolCall{
-								{
-									ID:   "call_submit",
-									Type: "function",
-									Function: llm.FunctionCall{
-										Name:      "submit_investigation_result",
-										Arguments: `{"status":"completed","summary":"No authorization found.","findings":{"authorization_present":false,"confidence":0.9,"evidence_ids":["ev_search"],"roles":[],"permissions":[],"role_permissions":[],"enforcement":[]}}`,
-									},
-								},
-							},
+							Role:    "assistant",
+							Content: `{"status":"completed","summary":"No authorization found.","findings":{"authorization_present":false,"confidence":0,"evidence_ids":[],"roles":[],"permissions":[],"role_permissions":[],"enforcement":[]}}`,
 						},
 					},
 				},
@@ -291,15 +298,17 @@ func TestAuthorizationPromptIncludesBothPriorFindingsWithoutChatHistory(
 	task := Task()
 	task.Context = append(json.RawMessage(nil), priorFindings...)
 	task.ValidateResult = nil
+	task.Budget.MaxTurns = 1
+	task.Budget.FinalizeTurns = 1
 
 	if _, err := runner.Run(context.Background(), task); err != nil {
 		t.Fatal(err)
 	}
 
 	request := <-requests
-	if len(request.Messages) != 2 {
+	if len(request.Messages) != 3 {
 		t.Fatalf(
-			"expected fresh system and objective messages only, got %d",
+			"expected fresh system, objective, and finalization messages, got %d",
 			len(request.Messages),
 		)
 	}

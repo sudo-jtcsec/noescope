@@ -261,11 +261,12 @@ Every positive-confidence entity, persistence record, and relationship must refe
 		ValidateResult: validateResult,
 
 		Budget: investigation.Budget{
-			MaxTurns:         15,
-			MaxToolCalls:     100,
-			MaxResultRepairs: 2,
-			FinalizeTurns:    2,
-			MaxDuration:      10 * time.Minute,
+			MaxTurns:           15,
+			MaxToolCalls:       100,
+			MaxFormatRepairs:   2,
+			MaxSemanticRepairs: 2,
+			FinalizeTurns:      2,
+			MaxDuration:        10 * time.Minute,
 		},
 	}
 }
@@ -283,15 +284,12 @@ func Run(
 		return nil, nil, err
 	}
 
-	var findings Findings
-	if err := json.Unmarshal(result.Findings, &findings); err != nil {
-		return nil, result, fmt.Errorf(
-			"parse entity findings: %w",
-			err,
-		)
+	findings, err := decodeFindings(result.Findings)
+	if err != nil {
+		return nil, result, err
 	}
 
-	return &findings, result, nil
+	return findings, result, nil
 }
 
 func validateResult(
@@ -300,7 +298,7 @@ func validateResult(
 ) error {
 	findings, err := decodeFindings(result.Findings)
 	if err != nil {
-		return err
+		return investigation.NewSubmissionFormatError(err)
 	}
 
 	entityIDs := make(map[string]struct{}, len(findings.Entities))
@@ -436,18 +434,23 @@ func validateResult(
 }
 
 func decodeFindings(data json.RawMessage) (*Findings, error) {
-	var rawFindings map[string]json.RawMessage
-	if err := json.Unmarshal(data, &rawFindings); err != nil {
-		return nil, fmt.Errorf("parse entity findings: %w", err)
+	var rawFindings struct {
+		Entities json.RawMessage `json:"entities"`
+	}
+	if err := investigation.DecodeObjectFindings(
+		data,
+		&rawFindings,
+		"entity findings",
+	); err != nil {
+		return nil, err
 	}
 
-	entitiesJSON, ok := rawFindings["entities"]
-	if !ok {
+	if len(rawFindings.Entities) == 0 {
 		return nil, fmt.Errorf("entities array is required")
 	}
 
 	var entityList *[]Entity
-	if err := json.Unmarshal(entitiesJSON, &entityList); err != nil {
+	if err := json.Unmarshal(rawFindings.Entities, &entityList); err != nil {
 		return nil, fmt.Errorf("parse entities: %w", err)
 	}
 	if entityList == nil {

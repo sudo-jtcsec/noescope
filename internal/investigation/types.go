@@ -6,11 +6,12 @@ import (
 )
 
 type Budget struct {
-	MaxTurns         int
-	MaxToolCalls     int
-	MaxResultRepairs int
-	FinalizeTurns    int
-	MaxDuration      time.Duration
+	MaxTurns           int
+	MaxToolCalls       int
+	MaxFormatRepairs   int
+	MaxSemanticRepairs int
+	FinalizeTurns      int
+	MaxDuration        time.Duration
 }
 
 type Task struct {

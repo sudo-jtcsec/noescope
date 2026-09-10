@@ -28,7 +28,7 @@ var submitSchema = json.RawMessage(`{
         },
         "frameworks": {
           "type": "array",
-          "items": {"$ref": "#/$defs/technology"}
+          "items": {"$ref": "#/$defs/framework"}
         },
         "formats": {
           "type": "array",
@@ -153,6 +153,10 @@ var submitSchema = json.RawMessage(`{
       "properties": {
         "name": {"type": "string"},
         "role": {"type": "string"},
+        "evidence_type": {
+          "type": "string",
+          "enum": ["direct", "inferred"]
+        },
         "confidence": {"type": "number"},
         "evidence_ids": {
           "type": "array",
@@ -160,6 +164,29 @@ var submitSchema = json.RawMessage(`{
         }
       },
       "required": ["name", "confidence", "evidence_ids"]
+    },
+    "framework": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "role": {"type": "string"},
+        "evidence_type": {
+          "type": "string",
+          "enum": ["direct"]
+        },
+        "confidence": {"type": "number"},
+        "evidence_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "required": [
+        "name",
+        "evidence_type",
+        "confidence",
+        "evidence_ids"
+      ],
+      "additionalProperties": false
     },
     "statement": {
       "type": "object",
@@ -202,6 +229,8 @@ Classification rules:
 - Frameworks belong in frameworks.
 - Ordinary dependencies/packages belong in libraries.
 - External HTTP APIs, protocols, or remote services belong in external_interfaces, not frameworks.
+- A named framework belongs in frameworks only when direct repository evidence identifies it. Directory structure or architectural resemblance alone is insufficient.
+- If no framework is directly supported, leave frameworks empty and describe a generic style such as custom PHP MVC-style application under architecture_style.
 
 Use repository evidence rather than guessing.
 
@@ -210,6 +239,10 @@ Do NOT investigate authentication, authorization, business features, or user wor
 		Instructions: `Start by orienting yourself with repo_info and the repository structure.
 
 Inspect likely manifests, dependency files, entrypoints, configuration files, and representative source files. Use search and read_file as needed.
+
+Check dependency manifests before naming frameworks. Every framework finding must set evidence_type=direct and cite evidence that directly identifies the framework, such as an explicit manifest dependency, an import/use of its namespace, bootstrap code that instantiates it, framework configuration, or canonical framework files backed by source. Never identify a named framework from Controller/Model/Template directories, generic MVC structure, or similar naming alone.
+
+Do not infer PSR-7 or PSR-15 merely because the application exposes HTTP endpoints or follows broadly PSR-like patterns. Verify named framework and protocol-stack claims against imports, bootstrap, configuration, or dependencies. If direct evidence is absent or ambiguous, use frameworks=[] and describe the architecture generically under architecture_style. Framework absence is a valid result.
 
 You have a limited context budget:
 - Prefer targeted inspection.
@@ -251,11 +284,12 @@ Once these criteria are satisfied, call submit_investigation_result immediately.
 		ValidateResult: validateResult,
 
 		Budget: investigation.Budget{
-			MaxTurns:         15,
-			MaxToolCalls:     100,
-			MaxResultRepairs: 2,
-			FinalizeTurns:    2,
-			MaxDuration:      10 * time.Minute,
+			MaxTurns:           15,
+			MaxToolCalls:       100,
+			MaxFormatRepairs:   2,
+			MaxSemanticRepairs: 2,
+			FinalizeTurns:      2,
+			MaxDuration:        10 * time.Minute,
 		},
 	}
 }
@@ -270,15 +304,12 @@ func Run(
 	}
 
 	var findings Findings
-
-	if err := json.Unmarshal(
+	if err := investigation.DecodeObjectFindings(
 		result.Findings,
 		&findings,
+		"architecture findings",
 	); err != nil {
-		return nil, result, fmt.Errorf(
-			"parse architecture findings: %w",
-			err,
-		)
+		return nil, result, err
 	}
 
 	return &findings, result, nil
@@ -290,12 +321,27 @@ func validateResult(
 ) error {
 	var findings Findings
 
-	if err := json.Unmarshal(result.Findings, &findings); err != nil {
-		return fmt.Errorf("parse architecture findings: %w", err)
+	if err := investigation.DecodeObjectFindings(
+		result.Findings,
+		&findings,
+		"architecture findings",
+	); err != nil {
+		return investigation.NewSubmissionFormatError(err)
 	}
 
 	validateTech := func(category string, items []Technology) error {
 		for i, item := range items {
+			if item.EvidenceType != "" &&
+				item.EvidenceType != "direct" &&
+				item.EvidenceType != "inferred" {
+				return fmt.Errorf(
+					"%s[%d] %q has invalid evidence type %q",
+					category,
+					i,
+					item.Name,
+					item.EvidenceType,
+				)
+			}
 			if err := validateEvidence(
 				fmt.Sprintf("%s[%d] %q", category, i, item.Name),
 				item.Confidence,
@@ -319,6 +365,15 @@ func validateResult(
 
 	if err := validateTech("frameworks", findings.Frameworks); err != nil {
 		return err
+	}
+	for i, framework := range findings.Frameworks {
+		if framework.EvidenceType != "direct" {
+			return fmt.Errorf(
+				"frameworks[%d] %q requires direct framework evidence",
+				i,
+				framework.Name,
+			)
+		}
 	}
 
 	if err := validateTech("libraries", findings.Libraries); err != nil {

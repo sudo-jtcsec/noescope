@@ -1,10 +1,11 @@
 package architecture
 
 type Technology struct {
-	Name        string   `json:"name"`
-	Role        string   `json:"role,omitempty"`
-	Confidence  float64  `json:"confidence"`
-	EvidenceIDs []string `json:"evidence_ids"`
+	Name         string   `json:"name"`
+	Role         string   `json:"role,omitempty"`
+	EvidenceType string   `json:"evidence_type,omitempty"`
+	Confidence   float64  `json:"confidence"`
+	EvidenceIDs  []string `json:"evidence_ids"`
 }
 
 type Statement struct {

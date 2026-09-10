@@ -20,6 +20,22 @@ func (e testEvidence) Exists(id string) bool {
 	return e[id]
 }
 
+func TestValidateResultRejectsStringifiedEntityFindings(t *testing.T) {
+	result := &investigation.Result{
+		Status:   "completed",
+		Summary:  "test result",
+		Findings: json.RawMessage(`"{\"entities\":[]}"`),
+	}
+
+	err := validateResult(result, testEvidence{})
+	if err == nil || !strings.Contains(
+		err.Error(),
+		"entity findings: expected object, got string",
+	) {
+		t.Fatalf("expected useful stringified findings error, got %v", err)
+	}
+}
+
 func TestValidateResultAcceptsEmptyEntityList(t *testing.T) {
 	result := resultWithFindings(t, Findings{Entities: []Entity{}})
 
@@ -176,17 +192,8 @@ func TestEntityPromptIncludesAllPriorFindingsWithoutChatHistory(t *testing.T) {
 				Choices: []llm.Choice{
 					{
 						Message: llm.Message{
-							Role: "assistant",
-							ToolCalls: []llm.ToolCall{
-								{
-									ID:   "call_submit",
-									Type: "function",
-									Function: llm.FunctionCall{
-										Name:      "submit_investigation_result",
-										Arguments: `{"status":"completed","summary":"No major domain entities found.","findings":{"entities":[]}}`,
-									},
-								},
-							},
+							Role:    "assistant",
+							Content: `{"status":"completed","summary":"No major domain entities found.","findings":{"entities":[]}}`,
 						},
 					},
 				},
@@ -207,18 +214,19 @@ func TestEntityPromptIncludesAllPriorFindingsWithoutChatHistory(t *testing.T) {
       "authorization": {"authorization_present": false}
     }`)
 
-	if _, _, err := Run(
-		context.Background(),
-		runner,
-		priorFindings,
-	); err != nil {
+	task := Task()
+	task.Context = priorFindings
+	task.ValidateResult = nil
+	task.Budget.MaxTurns = 1
+	task.Budget.FinalizeTurns = 1
+	if _, err := runner.Run(context.Background(), task); err != nil {
 		t.Fatal(err)
 	}
 
 	request := <-requests
-	if len(request.Messages) != 2 {
+	if len(request.Messages) != 3 {
 		t.Fatalf(
-			"expected fresh system and objective messages only, got %d",
+			"expected fresh system, objective, and finalization messages, got %d",
 			len(request.Messages),
 		)
 	}
