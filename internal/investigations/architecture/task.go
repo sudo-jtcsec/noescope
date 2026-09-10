@@ -254,6 +254,7 @@ Once these criteria are satisfied, call submit_investigation_result immediately.
 			MaxTurns:         15,
 			MaxToolCalls:     100,
 			MaxResultRepairs: 2,
+			FinalizeTurns:    2,
 			MaxDuration:      10 * time.Minute,
 		},
 	}

@@ -93,6 +93,25 @@ func (t *SearchTool) Execute(
 	}
 
 	evidence := make([]tools.EvidenceDraft, 0, len(result.Matches))
+	if len(result.Matches) == 0 {
+		searchMode := "literal"
+		if args.Regex {
+			searchMode = "regular expression"
+		}
+
+		evidence = append(evidence, tools.EvidenceDraft{
+			Kind: "search",
+			Path: args.Path,
+			Summary: fmt.Sprintf(
+				"%s search for %q under %q with file glob %q (case_sensitive=%t) returned no matches.",
+				searchMode,
+				args.Query,
+				args.Path,
+				args.FileGlob,
+				args.CaseSensitive,
+			),
+		})
+	}
 
 	for _, match := range result.Matches {
 		evidence = append(evidence, tools.EvidenceDraft{

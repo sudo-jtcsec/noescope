@@ -9,6 +9,7 @@ type Budget struct {
 	MaxTurns         int
 	MaxToolCalls     int
 	MaxResultRepairs int
+	FinalizeTurns    int
 	MaxDuration      time.Duration
 }
 
@@ -17,6 +18,7 @@ type Task struct {
 	Name         string
 	Objective    string
 	Instructions string
+	Context      json.RawMessage
 
 	ToolNames []string
 
@@ -28,8 +30,13 @@ type Task struct {
 }
 
 type Result struct {
-	Status     string               `json:"status"`
-	Summary    string               `json:"summary"`
+	Status string `json:"status"`
+
+	// Summary is human-readable narrative only. It is not canonical
+	// application state and must not be passed to downstream tasks.
+	Summary string `json:"summary"`
+
+	// Findings is the validated, canonical output of the investigation.
 	Findings   json.RawMessage      `json:"findings"`
 	Claims     []Claim              `json:"claims,omitempty"`
 	Unresolved []UnresolvedQuestion `json:"unresolved,omitempty"`

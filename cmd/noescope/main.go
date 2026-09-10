@@ -13,6 +13,8 @@ import (
 	"github.com/sudo-jtcsec/noescope/internal/evidence"
 	"github.com/sudo-jtcsec/noescope/internal/investigation"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/architecture"
+	"github.com/sudo-jtcsec/noescope/internal/investigations/authentication"
+	"github.com/sudo-jtcsec/noescope/internal/investigations/authorization"
 	"github.com/sudo-jtcsec/noescope/internal/llm"
 	"github.com/sudo-jtcsec/noescope/internal/repository"
 	runpkg "github.com/sudo-jtcsec/noescope/internal/run"
@@ -169,10 +171,10 @@ func discoverCommand() *cobra.Command {
 			)
 
 			fmt.Println(
-				"[1/1] Architecture Discovery",
+				"[1/3] Architecture Discovery",
 			)
 
-			findings, result, err := architecture.Run(
+			architectureFindings, architectureResult, err := architecture.Run(
 				ctx,
 				runner,
 			)
@@ -185,18 +187,9 @@ func discoverCommand() *cobra.Command {
 				Summary  string                 `json:"summary"`
 				Findings *architecture.Findings `json:"findings"`
 			}{
-				Status:   result.Status,
-				Summary:  result.Summary,
-				Findings: findings,
-			}
-
-			data, err := json.MarshalIndent(
-				output,
-				"",
-				"  ",
-			)
-			if err != nil {
-				return err
+				Status:   architectureResult.Status,
+				Summary:  architectureResult.Summary,
+				Findings: architectureFindings,
 			}
 
 			outputPath := filepath.Join(
@@ -205,17 +198,16 @@ func discoverCommand() *cobra.Command {
 				"architecture.json",
 			)
 
-			if err := os.WriteFile(
+			if err := writeJSON(
 				outputPath,
-				data,
-				0644,
+				output,
 			); err != nil {
 				return err
 			}
 
 			fmt.Printf(
 				"\nArchitecture discovery complete.\n%s\n",
-				result.Summary,
+				architectureResult.Summary,
 			)
 
 			fmt.Printf(
@@ -223,7 +215,159 @@ func discoverCommand() *cobra.Command {
 				outputPath,
 			)
 
+			architectureContext, err := marshalAuthenticationContext(
+				architectureFindings,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"marshal architecture context: %w",
+					err,
+				)
+			}
+
+			fmt.Println(
+				"\n[2/3] Authentication Discovery",
+			)
+
+			authenticationFindings, authenticationResult, err := authentication.Run(
+				ctx,
+				runner,
+				architectureContext,
+			)
+			if err != nil {
+				return err
+			}
+
+			authenticationOutput := struct {
+				Status     string                             `json:"status"`
+				Summary    string                             `json:"summary"`
+				Findings   *authentication.Findings           `json:"findings"`
+				Claims     []investigation.Claim              `json:"claims,omitempty"`
+				Unresolved []investigation.UnresolvedQuestion `json:"unresolved,omitempty"`
+			}{
+				Status:     authenticationResult.Status,
+				Summary:    authenticationResult.Summary,
+				Findings:   authenticationFindings,
+				Claims:     authenticationResult.Claims,
+				Unresolved: authenticationResult.Unresolved,
+			}
+
+			authenticationOutputPath := filepath.Join(
+				currentRun.Root,
+				"output",
+				"authentication.json",
+			)
+
+			if err := writeJSON(
+				authenticationOutputPath,
+				authenticationOutput,
+			); err != nil {
+				return err
+			}
+
+			fmt.Printf(
+				"\nAuthentication discovery complete.\n%s\n",
+				authenticationResult.Summary,
+			)
+
+			fmt.Printf(
+				"\nWritten to:\n%s\n",
+				authenticationOutputPath,
+			)
+
+			authorizationContext, err := marshalAuthorizationContext(
+				architectureFindings,
+				authenticationFindings,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"marshal authorization context: %w",
+					err,
+				)
+			}
+
+			fmt.Println(
+				"\n[3/3] Authorization Discovery",
+			)
+
+			authorizationFindings, authorizationResult, err := authorization.Run(
+				ctx,
+				runner,
+				authorizationContext,
+			)
+			if err != nil {
+				return err
+			}
+
+			authorizationOutput := struct {
+				Status     string                             `json:"status"`
+				Summary    string                             `json:"summary"`
+				Findings   *authorization.Findings            `json:"findings"`
+				Claims     []investigation.Claim              `json:"claims,omitempty"`
+				Unresolved []investigation.UnresolvedQuestion `json:"unresolved,omitempty"`
+			}{
+				Status:     authorizationResult.Status,
+				Summary:    authorizationResult.Summary,
+				Findings:   authorizationFindings,
+				Claims:     authorizationResult.Claims,
+				Unresolved: authorizationResult.Unresolved,
+			}
+
+			authorizationOutputPath := filepath.Join(
+				currentRun.Root,
+				"output",
+				"authorization.json",
+			)
+
+			if err := writeJSON(
+				authorizationOutputPath,
+				authorizationOutput,
+			); err != nil {
+				return err
+			}
+
+			fmt.Printf(
+				"\nAuthorization discovery complete.\n%s\n",
+				authorizationResult.Summary,
+			)
+
+			fmt.Printf(
+				"\nWritten to:\n%s\n",
+				authorizationOutputPath,
+			)
+
 			return nil
 		},
 	}
+}
+
+// Context builders intentionally accept only validated structured findings.
+// Investigation summaries are narrative-only and must not become downstream
+// canonical context.
+func marshalAuthenticationContext(
+	findings *architecture.Findings,
+) (json.RawMessage, error) {
+	return json.Marshal(findings)
+}
+
+func marshalAuthorizationContext(
+	architectureFindings *architecture.Findings,
+	authenticationFindings *authentication.Findings,
+) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		Architecture   *architecture.Findings   `json:"architecture"`
+		Authentication *authentication.Findings `json:"authentication"`
+	}{
+		Architecture:   architectureFindings,
+		Authentication: authenticationFindings,
+	})
+}
+
+func writeJSON(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, data, 0644)
 }

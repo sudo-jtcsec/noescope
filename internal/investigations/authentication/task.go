@@ -1,0 +1,448 @@
+package authentication
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/sudo-jtcsec/noescope/internal/investigation"
+)
+
+var submitSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "partial", "blocked"]
+    },
+    "summary": {"type": "string"},
+    "findings": {
+      "type": "object",
+      "properties": {
+        "authentication_present": {"type": "boolean"},
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "mechanisms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {"type": "string"},
+              "type": {
+                "type": "string",
+                "enum": [
+                  "form_session",
+                  "bearer",
+                  "basic",
+                  "oauth",
+                  "oidc",
+                  "saml",
+                  "api_key",
+                  "custom"
+                ]
+              },
+              "login_entrypoints": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "credential_fields": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "session": {
+                "type": "object",
+                "properties": {
+                  "type": {"type": "string"},
+                  "name": {"type": "string"},
+                  "storage": {"type": "string"}
+                },
+                "required": ["type"]
+              },
+              "established_by": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "checked_by": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "logout": {
+                "type": "object",
+                "properties": {
+                  "entrypoints": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                  },
+                  "behavior": {"type": "string"}
+                },
+                "required": ["entrypoints", "behavior"]
+              },
+              "source_components": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "evidence_ids": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            },
+            "required": [
+              "id",
+              "type",
+              "login_entrypoints",
+              "credential_fields",
+              "established_by",
+              "checked_by",
+              "source_components",
+              "confidence",
+              "evidence_ids"
+            ]
+          }
+        }
+      },
+      "required": [
+        "authentication_present",
+        "confidence",
+        "evidence_ids",
+        "mechanisms"
+      ]
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "subject": {"type": "string"},
+          "statement": {"type": "string"},
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": [
+          "subject",
+          "statement",
+          "confidence",
+          "evidence_ids"
+        ]
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": {"type": "string"},
+          "priority": {"type": "string"},
+          "reason": {"type": "string"},
+          "suggested_investigation": {"type": "string"},
+          "evidence_ids": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["question", "priority", "reason"]
+      }
+    }
+  },
+  "required": ["status", "summary", "findings"]
+}`)
+
+var mechanismTypes = map[string]struct{}{
+	"form_session": {},
+	"bearer":       {},
+	"basic":        {},
+	"oauth":        {},
+	"oidc":         {},
+	"saml":         {},
+	"api_key":      {},
+	"custom":       {},
+}
+
+func Task() investigation.Task {
+	return investigation.Task{
+		ID:   "authentication",
+		Name: "Authentication Discovery",
+
+		Objective: `Analyze the source repository and determine how user or client identity is authenticated.
+
+Determine:
+- whether authentication exists
+- each authentication mechanism in use
+- login entrypoints
+- credential or input fields, when discoverable
+- session or token representation
+- how authenticated state is established
+- how authenticated state is checked or enforced
+- logout entrypoints and behavior
+- relevant source components
+- unresolved questions
+
+A repository with no authentication is a valid completed result. In that case, return authentication_present=false, a supported confidence and evidence_ids conclusion, and mechanisms=[].
+
+Do not investigate authorization roles, permissions, or access-control policy except where a minimal distinction is necessary to determine whether code performs authentication or authorization.`,
+
+		Instructions: `Use the previously validated Architecture findings to target likely components and avoid rediscovering basic repository structure.
+
+Search for authentication indicators such as login, logout, session, cookie, token, bearer, password, credential, authentication, auth middleware, and user identity. Inspect only the most relevant routes, handlers, middleware, services, configuration, and client code.
+
+When concluding authentication is absent, collect representative evidence for that conclusion. Relevant evidence may include targeted searches showing no runtime authentication implementation, inspection of central configuration and entrypoints, or confirmation that outbound API credentials are client credentials only. Do not try to prove a universal negative by reading every file.
+
+Prefer targeted search and bounded file reads. Stop once the authentication behavior can be described confidently. If evidence is incomplete or ambiguous, report the uncertainty under unresolved instead of reading files indefinitely.
+
+The top-level authentication conclusion and every authentication mechanism with confidence greater than zero must reference valid evidence IDs. A negative authentication conclusion always requires evidence. Do not report unsupported mechanisms or behavior. Call submit_investigation_result as soon as the completion criteria are satisfied.`,
+
+		ToolNames: []string{
+			"repo_info",
+			"list_files",
+			"find_files",
+			"file_info",
+			"read_file",
+			"search",
+		},
+
+		SubmitSchema:   submitSchema,
+		ValidateResult: validateResult,
+
+		Budget: investigation.Budget{
+			MaxTurns:         15,
+			MaxToolCalls:     100,
+			MaxResultRepairs: 2,
+			FinalizeTurns:    2,
+			MaxDuration:      10 * time.Minute,
+		},
+	}
+}
+
+func Run(
+	ctx context.Context,
+	runner *investigation.Runner,
+	taskContext json.RawMessage,
+) (*Findings, *investigation.Result, error) {
+	task := Task()
+	task.Context = append(json.RawMessage(nil), taskContext...)
+
+	result, err := runner.Run(ctx, task)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var findings Findings
+
+	if err := json.Unmarshal(result.Findings, &findings); err != nil {
+		return nil, result, fmt.Errorf(
+			"parse authentication findings: %w",
+			err,
+		)
+	}
+
+	return &findings, result, nil
+}
+
+func validateResult(
+	result *investigation.Result,
+	evidence investigation.EvidenceLookup,
+) error {
+	var rawFindings map[string]json.RawMessage
+
+	if err := json.Unmarshal(result.Findings, &rawFindings); err != nil {
+		return fmt.Errorf("parse authentication findings: %w", err)
+	}
+
+	authenticationPresentJSON, ok := rawFindings["authentication_present"]
+	if !ok {
+		return fmt.Errorf("authentication_present is required")
+	}
+
+	var authenticationPresent *bool
+	if err := json.Unmarshal(
+		authenticationPresentJSON,
+		&authenticationPresent,
+	); err != nil {
+		return fmt.Errorf("parse authentication_present: %w", err)
+	}
+	if authenticationPresent == nil {
+		return fmt.Errorf("authentication_present is required")
+	}
+
+	confidenceJSON, ok := rawFindings["confidence"]
+	if !ok {
+		return fmt.Errorf("authentication confidence is required")
+	}
+
+	var confidence *float64
+	if err := json.Unmarshal(confidenceJSON, &confidence); err != nil {
+		return fmt.Errorf("parse authentication confidence: %w", err)
+	}
+	if confidence == nil {
+		return fmt.Errorf("authentication confidence is required")
+	}
+
+	evidenceIDsJSON, ok := rawFindings["evidence_ids"]
+	if !ok {
+		return fmt.Errorf("authentication evidence_ids array is required")
+	}
+
+	var evidenceIDs *[]string
+	if err := json.Unmarshal(evidenceIDsJSON, &evidenceIDs); err != nil {
+		return fmt.Errorf("parse authentication evidence_ids: %w", err)
+	}
+	if evidenceIDs == nil {
+		return fmt.Errorf("authentication evidence_ids array is required")
+	}
+
+	mechanismsJSON, ok := rawFindings["mechanisms"]
+	if !ok {
+		return fmt.Errorf("mechanisms array is required")
+	}
+
+	var mechanisms *[]Mechanism
+	if err := json.Unmarshal(mechanismsJSON, &mechanisms); err != nil {
+		return fmt.Errorf("parse authentication mechanisms: %w", err)
+	}
+	if mechanisms == nil {
+		return fmt.Errorf("mechanisms array is required")
+	}
+
+	findings := Findings{
+		AuthenticationPresent: *authenticationPresent,
+		Confidence:            *confidence,
+		EvidenceIDs:           *evidenceIDs,
+		Mechanisms:            *mechanisms,
+	}
+
+	if err := validateEvidence(
+		"authentication conclusion",
+		findings.Confidence,
+		findings.EvidenceIDs,
+		evidence,
+	); err != nil {
+		return err
+	}
+
+	if !findings.AuthenticationPresent && len(findings.EvidenceIDs) == 0 {
+		return fmt.Errorf(
+			"authentication_present is false but the conclusion has no evidence",
+		)
+	}
+
+	if !findings.AuthenticationPresent && len(findings.Mechanisms) > 0 {
+		return fmt.Errorf(
+			"authentication_present is false but mechanisms is not empty",
+		)
+	}
+
+	if findings.AuthenticationPresent && len(findings.Mechanisms) == 0 {
+		return fmt.Errorf(
+			"authentication_present is true but mechanisms is empty",
+		)
+	}
+
+	supportedMechanism := false
+
+	for i, mechanism := range findings.Mechanisms {
+		name := fmt.Sprintf(
+			"mechanisms[%d] %q",
+			i,
+			mechanism.ID,
+		)
+
+		if mechanism.ID == "" {
+			return fmt.Errorf("mechanisms[%d] has no id", i)
+		}
+
+		if _, ok := mechanismTypes[mechanism.Type]; !ok {
+			return fmt.Errorf(
+				"%s has invalid type %q",
+				name,
+				mechanism.Type,
+			)
+		}
+
+		if err := validateEvidence(
+			name,
+			mechanism.Confidence,
+			mechanism.EvidenceIDs,
+			evidence,
+		); err != nil {
+			return err
+		}
+
+		if mechanism.Confidence > 0 {
+			supportedMechanism = true
+		}
+	}
+
+	if findings.AuthenticationPresent && !supportedMechanism {
+		return fmt.Errorf(
+			"authentication_present is true but no mechanism has positive confidence",
+		)
+	}
+
+	for i, unresolved := range result.Unresolved {
+		for _, evidenceID := range unresolved.EvidenceIDs {
+			if !evidence.Exists(evidenceID) {
+				return fmt.Errorf(
+					"unresolved[%d] references unknown evidence ID %q",
+					i,
+					evidenceID,
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateEvidence(
+	name string,
+	confidence float64,
+	evidenceIDs []string,
+	evidence investigation.EvidenceLookup,
+) error {
+	if confidence < 0 || confidence > 1 {
+		return fmt.Errorf(
+			"%s has invalid confidence %.2f",
+			name,
+			confidence,
+		)
+	}
+
+	if confidence > 0 && len(evidenceIDs) == 0 {
+		return fmt.Errorf(
+			"%s has confidence %.2f but no evidence",
+			name,
+			confidence,
+		)
+	}
+
+	for _, evidenceID := range evidenceIDs {
+		if !evidence.Exists(evidenceID) {
+			return fmt.Errorf(
+				"%s references unknown evidence ID %q",
+				name,
+				evidenceID,
+			)
+		}
+	}
+
+	return nil
+}
