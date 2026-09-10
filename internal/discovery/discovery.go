@@ -13,6 +13,7 @@ import (
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authentication"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authorization"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/entities"
+	"github.com/sudo-jtcsec/noescope/internal/investigations/features"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
 )
 
@@ -22,7 +23,7 @@ func Run(
 	runRoot string,
 	out io.Writer,
 ) error {
-	return RunThrough(ctx, runner, runRoot, out, StageSurface)
+	return RunThrough(ctx, runner, runRoot, out, StageFeatures)
 }
 
 func RunThrough(
@@ -222,6 +223,52 @@ func RunThrough(
 		"\nTechnical surface discovery complete.\nDiscovered %d interfaces.\n\nWritten to:\n%s\n",
 		len(surfaceFindings.Interfaces),
 		surfacePath,
+	)
+	if through == StageSurface {
+		return nil
+	}
+
+	featureContext, err := buildFeatureContext(
+		architectureFindings,
+		authenticationFindings,
+		authorizationFindings,
+		entityFindings,
+		surfaceFindings,
+	)
+	if err != nil {
+		return fmt.Errorf("marshal feature context: %w", err)
+	}
+
+	fmt.Fprintf(out, "\n[6/%d] Feature Discovery\n", totalStages)
+	logContextProjection(out, "features", featureContext)
+
+	featureFindings, featureResult, err := features.Run(
+		ctx,
+		runner,
+		featureContext.Data,
+		authorizationFindings,
+		entityFindings,
+		surfaceFindings,
+	)
+	if err != nil {
+		return fmt.Errorf("feature discovery: %w", err)
+	}
+
+	featuresPath := outputPath(runRoot, "features.json")
+	if err := writeResult(
+		featuresPath,
+		featureResult,
+		featureFindings,
+	); err != nil {
+		return err
+	}
+	topLevelModules, totalNodes := features.Counts(featureFindings)
+	fmt.Fprintf(
+		out,
+		"\nFeature discovery complete.\nDiscovered %d top-level modules, %d total feature nodes.\n\nWritten to:\n%s\n",
+		topLevelModules,
+		totalNodes,
+		featuresPath,
 	)
 
 	return nil

@@ -26,6 +26,9 @@ func TestSubmitSchemaIsValidJSON(t *testing.T) {
 	if !json.Valid(Task().SubmitSchema) {
 		t.Fatal("surface submission schema is not valid JSON")
 	}
+	if !strings.Contains(string(Task().SubmitSchema), `"anyOf"`) {
+		t.Fatal("surface schema does not require usable locator fields")
+	}
 }
 
 func TestValidateResultRejectsStringEncodedFindingsWithUsefulError(t *testing.T) {
@@ -563,7 +566,7 @@ func TestTaskDistinguishesSurfacesFromFeatures(t *testing.T) {
 		"EXTERNAL INTEGRATION",
 		"POST /api/customers exposed by the target is an interface",
 		"POST https://api.stripe.com made by the target is an integration",
-		"OpenAI-compatible chat completions service called by Noescope is an integration",
+		"Examples are classification guidance only",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("surface prompt does not contain %q", expected)
@@ -577,7 +580,7 @@ func TestTaskAdaptsToCLIApplications(t *testing.T) {
 	for _, expected := range []string{
 		"For CLI applications",
 		"Cobra, urfave, or flag command tree",
-		"noescope discover",
+		"cli.discover",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("surface prompt does not contain %q", expected)

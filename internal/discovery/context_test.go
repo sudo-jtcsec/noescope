@@ -13,7 +13,180 @@ import (
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authentication"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authorization"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/entities"
+	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
 )
+
+func TestFeatureContextContainsSemanticGroupingEssentials(t *testing.T) {
+	architectureFindings, authenticationFindings,
+		authorizationFindings, entityFindings := contextFixtures()
+	surfaceFindings := featureSurfaceFixture()
+
+	projection, err := buildFeatureContext(
+		architectureFindings,
+		authenticationFindings,
+		authorizationFindings,
+		entityFindings,
+		surfaceFindings,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var context featureTaskContext
+	if err := json.Unmarshal(projection.Data, &context); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(context.Architecture.Languages, []string{"PHP"}) ||
+		context.Architecture.ArchitectureStyle != "custom MVC" {
+		t.Fatalf("architecture essentials missing: %#v", context.Architecture)
+	}
+	if !context.Authentication.AuthenticationPresent ||
+		context.Authentication.Mechanisms[0].Type != "form_session" {
+		t.Fatalf("authentication essentials missing: %#v", context.Authentication)
+	}
+	if context.Authorization.Roles[0].ID != "admin" ||
+		context.Authorization.Permissions[0].ID != "project.manage" {
+		t.Fatalf("authorization IDs missing: %#v", context.Authorization)
+	}
+	if context.Entities[0].ID != "project" ||
+		context.Entities[0].EvidenceIDs[0] != "ev_entity" {
+		t.Fatalf("entity essentials missing: %#v", context.Entities)
+	}
+	if context.Surface.Interfaces[0].ID != "project.create" ||
+		context.Surface.Interfaces[0].HandlerNames[0] != "ProjectController::create" ||
+		context.Surface.Interfaces[0].EvidenceIDs[0] != "ev_surface" {
+		t.Fatalf("surface essentials missing: %#v", context.Surface)
+	}
+	if context.Surface.Integrations[0].ID != "integration.smtp" {
+		t.Fatalf("minimal integrations missing: %#v", context.Surface.Integrations)
+	}
+}
+
+func TestFeatureContextExcludesSummariesChatAndVerboseCanonicalData(t *testing.T) {
+	architectureFindings, authenticationFindings,
+		authorizationFindings, entityFindings := contextFixtures()
+	surfaceFindings := featureSurfaceFixture()
+	projection, err := buildFeatureContext(
+		architectureFindings,
+		authenticationFindings,
+		authorizationFindings,
+		entityFindings,
+		surfaceFindings,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextText := string(projection.Data)
+	priorResults := []*investigation.Result{
+		{Summary: "prior summary sentinel"},
+	}
+	for _, result := range priorResults {
+		if strings.Contains(contextText, result.Summary) {
+			t.Fatalf("feature context contains prior summary %q", result.Summary)
+		}
+	}
+	for _, excluded := range []string{
+		"prior chat transcript sentinel",
+		"verbose directory purpose",
+		"verbose source component",
+		"verbose role description",
+		"verbose permission description",
+		`"confidence"`,
+		"second-evidence-must-be-projected-away",
+		"smtp source detail",
+	} {
+		if strings.Contains(contextText, excluded) {
+			t.Fatalf("feature context contains excluded data %q", excluded)
+		}
+	}
+	if strings.Count(contextText, "ev_surface") != 1 {
+		t.Fatalf("expected one bounded surface evidence ID: %s", contextText)
+	}
+}
+
+func TestFeatureContextProjectionDoesNotMutateCanonicalFindings(t *testing.T) {
+	architectureFindings, authenticationFindings,
+		authorizationFindings, entityFindings := contextFixtures()
+	surfaceFindings := featureSurfaceFixture()
+	canonical := []any{
+		architectureFindings,
+		authenticationFindings,
+		authorizationFindings,
+		entityFindings,
+		surfaceFindings,
+	}
+	before, err := json.Marshal(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildFeatureContext(
+		architectureFindings,
+		authenticationFindings,
+		authorizationFindings,
+		entityFindings,
+		surfaceFindings,
+	); err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("feature context projection mutated canonical findings")
+	}
+}
+
+func TestKanboardSizedFeatureProjectionIsSubstantiallySmaller(t *testing.T) {
+	architectureFindings, authenticationFindings,
+		authorizationFindings, entityFindings := contextFixtures()
+	surfaceFindings := featureSurfaceFixture()
+	for i := 0; i < 100; i++ {
+		authorizationFindings.Permissions = append(
+			authorizationFindings.Permissions,
+			authorization.Permission{
+				ID:          fmt.Sprintf("permission.%03d", i),
+				Name:        fmt.Sprintf("Permission %03d", i),
+				Description: strings.Repeat("verbose permission detail ", 10),
+				EvidenceIDs: []string{"ev_permission", "ev_permission_extra"},
+			},
+		)
+	}
+	for i := 0; i < 60; i++ {
+		surfaceFindings.Interfaces = append(surfaceFindings.Interfaces, surface.Interface{
+			ID:          fmt.Sprintf("project.action%03d", i),
+			Type:        "form_action",
+			Name:        fmt.Sprintf("Project action %03d", i),
+			Description: fmt.Sprintf("Performs meaningful project action %03d.", i),
+			Locator:     surface.InterfaceLocator{Path: fmt.Sprintf("/project/action/%d", i)},
+			EntityIDs:   []string{"project"},
+			SourceComponents: []surface.SourceComponent{{
+				Path: strings.Repeat("verbose/source/component/", 8),
+			}},
+			EvidenceIDs: []string{"ev_surface", "ev_surface_extra"},
+		})
+	}
+
+	projection, err := buildFeatureContext(
+		architectureFindings,
+		authenticationFindings,
+		authorizationFindings,
+		entityFindings,
+		surfaceFindings,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.ProjectedBytes >= projection.CanonicalBytes/2 {
+		t.Fatalf(
+			"feature projection was not substantially smaller: %d -> %d",
+			projection.CanonicalBytes,
+			projection.ProjectedBytes,
+		)
+	}
+	if projection.ProjectedBytes > maxProjectedContextBytes {
+		t.Fatal("feature projection exceeds preflight threshold")
+	}
+}
 
 func TestSurfaceContextContainsCanonicalEssentials(t *testing.T) {
 	architectureFindings, authenticationFindings,
@@ -298,4 +471,54 @@ func contextFixtures() (
 	}
 	return architectureFindings, authenticationFindings,
 		authorizationFindings, entityFindings
+}
+
+func featureSurfaceFixture() *surface.Findings {
+	return &surface.Findings{
+		Interfaces: []surface.Interface{{
+			ID:          "project.create",
+			Type:        "form_action",
+			Name:        "Create Project",
+			Description: "Creates a project.",
+			Locator: surface.InterfaceLocator{
+				Path: "/projects", Method: "POST",
+			},
+			Access: &surface.Access{
+				Authentication: "required",
+				RoleIDs:        []string{"admin"},
+				PermissionIDs:  []string{"project.manage"},
+				EvidenceIDs:    []string{"access detail excluded"},
+			},
+			EntityIDs: []string{"project"},
+			SourceComponents: []surface.SourceComponent{{
+				Path: "verbose source component",
+			}},
+			EvidenceIDs: []string{
+				"ev_surface",
+				"second-evidence-must-be-projected-away",
+			},
+		}},
+		Integrations: []surface.Integration{{
+			ID:          "integration.smtp",
+			Type:        "email",
+			Name:        "SMTP",
+			Description: "smtp source detail",
+			SourceComponents: []surface.SourceComponent{{
+				Path: "smtp source detail",
+			}},
+		}},
+		Handlers: []surface.Handler{{
+			ID:           "handler.project.create",
+			Name:         "ProjectController::create",
+			Path:         "verbose source component",
+			InterfaceIDs: []string{"project.create"},
+		}},
+		Relationships: []surface.Relationship{{
+			Type:            "integration_call",
+			FromInterfaceID: "project.create",
+			ToIntegrationID: "integration.smtp",
+			Description:     "Sends a project notification.",
+			EvidenceIDs:     []string{"ev_relationship", "ev_relationship_extra"},
+		}},
+	}
 }

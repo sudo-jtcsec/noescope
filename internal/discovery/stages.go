@@ -10,6 +10,7 @@ const (
 	StageAuthorization  Stage = "authorization"
 	StageEntities       Stage = "entities"
 	StageSurface        Stage = "surface"
+	StageFeatures       Stage = "features"
 )
 
 var orderedStages = []Stage{
@@ -18,11 +19,12 @@ var orderedStages = []Stage{
 	StageAuthorization,
 	StageEntities,
 	StageSurface,
+	StageFeatures,
 }
 
 func ParseThrough(value string) (Stage, error) {
 	if value == "" {
-		return StageSurface, nil
+		return StageFeatures, nil
 	}
 
 	stage := Stage(value)
@@ -33,7 +35,7 @@ func ParseThrough(value string) (Stage, error) {
 	}
 
 	return "", fmt.Errorf(
-		"unknown discovery stage %q (supported: architecture, authentication, authorization, entities, surface)",
+		"unknown discovery stage %q (supported: architecture, authentication, authorization, entities, surface, features)",
 		value,
 	)
 }

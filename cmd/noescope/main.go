@@ -185,7 +185,7 @@ func discoverCommand() *cobra.Command {
 		&throughName,
 		"through",
 		"",
-		"run discovery through a stage (architecture, authentication, authorization, entities, surface)",
+		"run discovery through a stage (architecture, authentication, authorization, entities, surface, features)",
 	)
 
 	return command

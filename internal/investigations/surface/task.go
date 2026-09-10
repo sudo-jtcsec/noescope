@@ -59,6 +59,12 @@ var submitSchema = json.RawMessage(`{
                   "schedule": {"type": "string"},
                   "event": {"type": "string"}
                 },
+                "anyOf": [
+                  {"required": ["path"]},
+                  {"required": ["command"]},
+                  {"required": ["schedule"]},
+                  {"required": ["event"]}
+                ],
                 "additionalProperties": false
               },
               "access": {
@@ -173,6 +179,12 @@ var submitSchema = json.RawMessage(`{
                   "name": {"type": "string"},
                   "command": {"type": "string"}
                 },
+                "anyOf": [
+                  {"required": ["base_url"]},
+                  {"required": ["path"]},
+                  {"required": ["name"]},
+                  {"required": ["command"]}
+                ],
                 "additionalProperties": false
               },
               "authentication": {
@@ -475,7 +487,7 @@ An APPLICATION INTERFACE is something a caller invokes on this application. Exam
 
 An EXTERNAL INTEGRATION is a system or service that this application invokes or depends on. Examples include outbound HTTP APIs, databases, object storage, caches, message brokers, email providers, filesystems, and external processes.
 
-Do not mix these concepts. POST /api/customers exposed by the target is an interface. POST https://api.stripe.com made by the target is an integration. noescope discover is an interface. The OpenAI-compatible chat completions service called by Noescope is an integration.
+Do not mix these concepts. POST /api/customers exposed by the target is an interface. POST https://api.stripe.com made by the target is an integration. A target application's discover CLI command is an interface, while a remote model service it calls is an integration. Examples are classification guidance only and are never evidence that the target contains those surfaces.
 
 Capture primary handlers only for application interfaces. Place outbound client implementations under the integration's source_components. Capture useful evidence-backed connections between interfaces, plus calls from application interfaces to integrations.
 
@@ -489,15 +501,13 @@ An external integration is outbound from the application. Record its provider-ne
 
 For custom PHP, inspect entry PHP files, routing, forms/actions, templates, controllers/includes, and relevant server routing configuration. For Laravel, inspect web/API routes, controllers, console commands, and schedules. For Rails, inspect routes, controllers, and jobs. For Django, inspect URL configuration, views, routers/viewsets, management commands, and tasks. For Go web applications, inspect router registration, HTTP handlers, CLI commands, and workers/jobs. For CLI applications, inspect the Cobra, urfave, or flag command tree, executable subcommands, and their callbacks.
 
-For Noescope, likely application interfaces include cli.root, cli.version, cli.init, and cli.discover. The OpenAI-compatible LLM API called by Noescope belongs in integrations as integration.llm, not in interfaces as api.llm.chat.completions. Client.Chat belongs in that integration's source_components and is not an application-interface handler. Do not invent inbound HTTP endpoints, web pages, authentication endpoints, or any other unsupported surface.
-
 Use stable lowercase semantic IDs such as cli.root, cli.discover, customer.list, or api.customer.create. Do not generate UUIDs or derive IDs mechanically from filenames.
 
 Locators should contain only relevant fields: method/path for HTTP, command for CLI or scripts, schedule and command for scheduled jobs, or event for event consumers. A form submission may include a small input_names list when clearly visible, but do not reconstruct validation schemas.
 
 Access is optional. Use required, not_required, or unknown for authentication. Do not invent role or permission IDs. Positive-confidence access metadata must cite repository evidence or evidence already referenced by the validated prior findings. If prior findings establish that authentication and authorization are absent, not_required with empty role and permission lists is usually appropriate when supported. Use unknown when access cannot be established.
 
-Integration authentication types are none, bearer, basic, api_key, oauth, certificate, custom, or unknown. Credential sources may identify configuration keys such as ai.api_key, but never application-user roles or permissions. Do not expose credential values.
+Integration authentication types are none, bearer, basic, api_key, oauth, certificate, custom, or unknown. Credential sources may identify configuration keys, but never application-user roles or permissions. Do not expose credential values.
 
 Relationships are limited to useful concrete navigation, redirect, form submission, API call, command flow, or event flow edges between application interfaces, plus integration_call edges from a declared interface to a declared integration. Do not turn them into full workflows.
 

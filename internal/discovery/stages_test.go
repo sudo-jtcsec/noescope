@@ -11,12 +11,13 @@ func TestParseThroughStageCounts(t *testing.T) {
 		stage Stage
 		count int
 	}{
-		{"", StageSurface, 5},
+		{"", StageFeatures, 6},
 		{"architecture", StageArchitecture, 1},
 		{"authentication", StageAuthentication, 2},
 		{"authorization", StageAuthorization, 3},
 		{"entities", StageEntities, 4},
 		{"surface", StageSurface, 5},
+		{"features", StageFeatures, 6},
 	}
 
 	for _, test := range tests {
@@ -33,7 +34,7 @@ func TestParseThroughStageCounts(t *testing.T) {
 }
 
 func TestParseThroughRejectsUnknownStage(t *testing.T) {
-	_, err := ParseThrough("features")
+	_, err := ParseThrough("workflows")
 	if err == nil || !strings.Contains(err.Error(), "unknown discovery stage") {
 		t.Fatalf("unexpected error: %v", err)
 	}
