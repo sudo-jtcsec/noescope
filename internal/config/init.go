@@ -22,6 +22,14 @@ application:
 
 identities: []
 
+runtime:
+  base_url: ""
+  browser:
+    headless: true
+    ignore_tls_errors: false
+    executable: ""
+  identity: ""
+
 ai:
   base_url: http://localhost:8000/v1
   model: ""

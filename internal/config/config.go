@@ -5,6 +5,7 @@ type Config struct {
 	Source      SourceConfig      `yaml:"source"`
 	Application ApplicationConfig `yaml:"application"`
 	Identities  []IdentityConfig  `yaml:"identities"`
+	Runtime     RuntimeConfig     `yaml:"runtime"`
 	AI          AIConfig          `yaml:"ai"`
 	Discovery   DiscoveryConfig   `yaml:"discovery"`
 }
@@ -26,8 +27,20 @@ type ApplicationConfig struct {
 type IdentityConfig struct {
 	ID           string `yaml:"id"`
 	ExpectedRole string `yaml:"expected_role"`
-	Username     string `yaml:"username"`
-	Password     string `yaml:"password"`
+	UsernameEnv  string `yaml:"username_env"`
+	PasswordEnv  string `yaml:"password_env"`
+}
+
+type RuntimeConfig struct {
+	BaseURL  string               `yaml:"base_url"`
+	Browser  RuntimeBrowserConfig `yaml:"browser"`
+	Identity string               `yaml:"identity"`
+}
+
+type RuntimeBrowserConfig struct {
+	Headless        bool   `yaml:"headless"`
+	IgnoreTLSErrors bool   `yaml:"ignore_tls_errors"`
+	Executable      string `yaml:"executable"`
 }
 
 type AIConfig struct {
