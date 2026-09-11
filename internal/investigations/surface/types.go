@@ -1,11 +1,14 @@
 package surface
 
 type InterfaceLocator struct {
-	Path     string `json:"path,omitempty"`
-	Method   string `json:"method,omitempty"`
-	Command  string `json:"command,omitempty"`
-	Schedule string `json:"schedule,omitempty"`
-	Event    string `json:"event,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Method        string `json:"method,omitempty"`
+	Command       string `json:"command,omitempty"`
+	Schedule      string `json:"schedule,omitempty"`
+	Event         string `json:"event,omitempty"`
+	Protocol      string `json:"protocol,omitempty"`
+	MethodName    string `json:"method_name,omitempty"`
+	TransportPath string `json:"transport_path,omitempty"`
 }
 
 type Access struct {
@@ -87,4 +90,20 @@ type Findings struct {
 	Integrations  []Integration  `json:"integrations"`
 	Handlers      []Handler      `json:"handlers"`
 	Relationships []Relationship `json:"relationships"`
+	Coverage      Coverage       `json:"coverage"`
+}
+
+type Coverage struct {
+	Web          CategoryCoverage `json:"web"`
+	API          CategoryCoverage `json:"api"`
+	CLI          CategoryCoverage `json:"cli"`
+	Background   CategoryCoverage `json:"background"`
+	Integrations CategoryCoverage `json:"integrations"`
+}
+
+type CategoryCoverage struct {
+	Applicable   bool   `json:"applicable"`
+	Status       string `json:"status"`
+	Interfaces   int    `json:"interfaces"`
+	Integrations int    `json:"integrations"`
 }

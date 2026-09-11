@@ -102,6 +102,37 @@ func TestRunnerIncludesTaskContextInPrompt(t *testing.T) {
 	}
 }
 
+func TestRunnerKeepsValidatedTaskContextCompact(t *testing.T) {
+	requests := make(chan llm.ChatRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request llm.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requests <- request
+		_ = json.NewEncoder(w).Encode(llm.ChatResponse{Choices: []llm.Choice{{
+			Message: llm.Message{Role: "assistant", Content: validSubmissionArguments},
+		}}})
+	}))
+	defer server.Close()
+
+	contextData := json.RawMessage(`{"interfaces":[{"id":"api.task.create"}]}`)
+	runner := NewRunner(
+		llm.NewClient(server.URL, "", "test-model"),
+		tools.NewRegistry(), evidence.NewStore(t.TempDir()),
+	)
+	task := repairTestTask(Budget{MaxTurns: 1, FinalizeTurns: 1})
+	task.Context = contextData
+	if _, err := runner.Run(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	request := <-requests
+	if !strings.Contains(request.Messages[0].Content, string(contextData)) {
+		t.Fatalf("task context was expanded or changed: %q", request.Messages[0].Content)
+	}
+}
+
 func TestRunnerSendsStructuredSchemaAsJSONObject(t *testing.T) {
 	server := newScriptedLLMServer(t, []llm.Message{
 		submissionMessage("call_submit", validSubmissionArguments),
@@ -367,6 +398,108 @@ func TestRunnerUsesIndependentFormatAndSemanticRepairBudgets(t *testing.T) {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("missing log %q:\n%s", expected, joined)
 		}
+	}
+}
+
+func TestRunnerCapturesTruncatedStructuredResponseMetadataWithoutRepair(t *testing.T) {
+	completionTokens := 8192
+	requests := 0
+	const secretContent = `{"status":"completed","summary":"must-not-be-logged"`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(llm.ChatResponse{
+			Choices: []llm.Choice{{
+				Message:      llm.Message{Role: "assistant", Content: secretContent},
+				FinishReason: "length",
+			}},
+			Usage: llm.Usage{CompletionTokens: &completionTokens},
+		})
+	}))
+	defer server.Close()
+
+	runner := testRunner(t, server.URL, tools.NewRegistry())
+	var logs []string
+	runner.Logf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	task := repairTestTask(Budget{
+		MaxTurns: 1, FinalizeTurns: 1, MaxFormatRepairs: 2,
+		MaxStructuredResultBytes: 1024,
+	})
+	_, err := runner.Run(context.Background(), task)
+	var truncated *StructuredOutputTruncated
+	if !errors.As(err, &truncated) {
+		t.Fatalf("expected typed truncation error, got %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("truncated result consumed format repairs: %d requests", requests)
+	}
+	if truncated.Metadata.FinishReason != "length" ||
+		truncated.Metadata.CompletionTokens == nil ||
+		*truncated.Metadata.CompletionTokens != completionTokens ||
+		truncated.Metadata.JSONValid || !truncated.Metadata.AppearsTruncated {
+		t.Fatalf("unexpected structured metadata: %#v", truncated.Metadata)
+	}
+	logText := strings.Join(logs, "\n")
+	for _, want := range []string{
+		"finish_reason=length", "completion_tokens=8192",
+		"json_valid=false", "appears_truncated=true",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("structured diagnostic missing %q: %s", want, logText)
+		}
+	}
+	if strings.Contains(logText, "must-not-be-logged") {
+		t.Fatalf("structured response content leaked into logs: %s", logText)
+	}
+}
+
+func TestRunnerOversizedStructuredResponseDoesNotUseFormatRepair(t *testing.T) {
+	requests := 0
+	content := `{"status":"completed","summary":"` + strings.Repeat("x", 256) +
+		`","findings":{"ok":true}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(llm.ChatResponse{Choices: []llm.Choice{{
+			Message: llm.Message{Role: "assistant", Content: content}, FinishReason: "stop",
+		}}})
+	}))
+	defer server.Close()
+
+	runner := testRunner(t, server.URL, tools.NewRegistry())
+	task := repairTestTask(Budget{
+		MaxTurns: 1, FinalizeTurns: 1, MaxFormatRepairs: 2,
+		MaxStructuredResultBytes: 128,
+	})
+	_, err := runner.Run(context.Background(), task)
+	var tooLarge *StructuredOutputTooLarge
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("expected typed size error, got %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("oversized result consumed format repairs: %d requests", requests)
+	}
+}
+
+func TestRunnerRepairsSmallMalformedStructuredResponse(t *testing.T) {
+	server := newScriptedLLMServer(t, []llm.Message{
+		{Role: "assistant", Content: `{"status":`},
+		{Role: "assistant", Content: validSubmissionArguments},
+	})
+	defer server.Close()
+
+	runner := testRunner(t, server.URL, tools.NewRegistry())
+	task := repairTestTask(Budget{
+		MaxTurns: 1, FinalizeTurns: 1, MaxFormatRepairs: 1,
+		MaxStructuredResultBytes: 1024,
+	})
+	if _, err := runner.Run(context.Background(), task); err != nil {
+		t.Fatalf("small malformed result did not use ordinary format repair: %v", err)
+	}
+	if len(server.Requests()) != 2 {
+		t.Fatalf("expected one format repair, got %d requests", len(server.Requests()))
 	}
 }
 

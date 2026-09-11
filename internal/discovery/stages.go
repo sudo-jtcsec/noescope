@@ -48,3 +48,17 @@ func (s Stage) Count() int {
 	}
 	return 0
 }
+
+func ValidateResumeTarget(recorded, requested Stage) error {
+	if recorded.Count() == 0 || requested.Count() == 0 {
+		return fmt.Errorf("invalid resume stage transition %q -> %q", recorded, requested)
+	}
+	if requested.Count() < recorded.Count() {
+		return fmt.Errorf(
+			"cannot move resumed run target backward from %s to %s",
+			recorded,
+			requested,
+		)
+	}
+	return nil
+}

@@ -12,6 +12,9 @@ type Budget struct {
 	MaxSemanticRepairs int
 	FinalizeTurns      int
 	MaxDuration        time.Duration
+	// MaxStructuredResultBytes bounds a structured response before parsing.
+	// Zero leaves the response size unbounded for tasks that cannot be sharded.
+	MaxStructuredResultBytes int
 }
 
 type Task struct {

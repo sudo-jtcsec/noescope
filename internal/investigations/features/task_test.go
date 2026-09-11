@@ -226,7 +226,7 @@ func TestFeatureTaskUsesToolFreeStructuredFinalization(t *testing.T) {
 	if investigation.JSONValueKind(request.ResponseFormat.JSONSchema.Schema) != "object" {
 		t.Fatal("feature schema was not serialized as an object")
 	}
-	if !strings.Contains(request.Messages[0].Content, `"id": "project"`) {
+	if !strings.Contains(request.Messages[0].Content, `"id":"project"`) {
 		t.Fatal("structured prior findings were not included")
 	}
 }

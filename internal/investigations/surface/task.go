@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/sudo-jtcsec/noescope/internal/investigation"
+	"github.com/sudo-jtcsec/noescope/internal/investigations/architecture"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authorization"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/entities"
 )
@@ -57,13 +59,18 @@ var submitSchema = json.RawMessage(`{
                   "method": {"type": "string"},
                   "command": {"type": "string"},
                   "schedule": {"type": "string"},
-                  "event": {"type": "string"}
+                  "event": {"type": "string"},
+                  "protocol": {"type": "string"},
+                  "method_name": {"type": "string"},
+                  "transport_path": {"type": "string"}
                 },
                 "anyOf": [
                   {"required": ["path"]},
                   {"required": ["command"]},
                   {"required": ["schedule"]},
-                  {"required": ["event"]}
+                  {"required": ["event"]},
+                  {"required": ["method_name"]},
+                  {"required": ["transport_path"]}
                 ],
                 "additionalProperties": false
               },
@@ -173,11 +180,11 @@ var submitSchema = json.RawMessage(`{
               "locator": {
                 "type": "object",
                 "properties": {
-                  "base_url": {"type": "string"},
-                  "path": {"type": "string"},
-                  "method": {"type": "string"},
-                  "name": {"type": "string"},
-                  "command": {"type": "string"}
+                  "base_url": {"type": "string", "minLength": 1},
+                  "path": {"type": "string", "minLength": 1},
+                  "method": {"type": "string", "minLength": 1},
+                  "name": {"type": "string", "minLength": 1},
+                  "command": {"type": "string", "minLength": 1}
                 },
                 "anyOf": [
                   {"required": ["base_url"]},
@@ -469,9 +476,12 @@ var authenticationAccessValues = map[string]struct{}{
 }
 
 type priorReferences struct {
-	entityIDs     map[string]struct{}
-	roleIDs       map[string]struct{}
-	permissionIDs map[string]struct{}
+	entityIDs            map[string]struct{}
+	roleIDs              map[string]struct{}
+	permissionIDs        map[string]struct{}
+	interfaceIDs         map[string]struct{}
+	integrationIDs       map[string]struct{}
+	internalLibraryNames map[string]struct{}
 }
 
 func Task() investigation.Task {
@@ -544,34 +554,45 @@ func Run(
 	ctx context.Context,
 	runner *investigation.Runner,
 	taskContext json.RawMessage,
+	architectureFindings *architecture.Findings,
 	authorizationFindings *authorization.Findings,
 	entityFindings *entities.Findings,
 ) (*Findings, *investigation.Result, error) {
-	references := referencesFromFindings(
+	return RunWithOptions(
+		ctx,
+		runner,
+		taskContext,
+		architectureFindings,
+		authorizationFindings,
+		entityFindings,
+		RunOptions{},
+	)
+}
+
+func RunWithOptions(
+	ctx context.Context,
+	runner *investigation.Runner,
+	taskContext json.RawMessage,
+	architectureFindings *architecture.Findings,
+	authorizationFindings *authorization.Findings,
+	entityFindings *entities.Findings,
+	options RunOptions,
+) (*Findings, *investigation.Result, error) {
+	references := referencesFromAllFindings(
+		architectureFindings,
 		authorizationFindings,
 		entityFindings,
 	)
-
-	task := Task()
-	task.Context = append(json.RawMessage(nil), taskContext...)
-	task.ValidateResult = func(
-		result *investigation.Result,
-		evidence investigation.EvidenceLookup,
-	) error {
-		return validateResultWithReferences(result, evidence, references)
-	}
-
-	result, err := runner.Run(ctx, task)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	findings, err := decodeFindings(result.Findings)
-	if err != nil {
-		return nil, result, err
-	}
-
-	return findings, result, nil
+	return runCategoryCoordinator(
+		ctx,
+		runner.Run,
+		runner.Evidence,
+		runner.Logf,
+		taskContext,
+		architectureFindings,
+		references,
+		options,
+	)
 }
 
 func validateResult(
@@ -582,9 +603,11 @@ func validateResult(
 		result,
 		evidence,
 		priorReferences{
-			entityIDs:     map[string]struct{}{},
-			roleIDs:       map[string]struct{}{},
-			permissionIDs: map[string]struct{}{},
+			entityIDs:      map[string]struct{}{},
+			roleIDs:        map[string]struct{}{},
+			permissionIDs:  map[string]struct{}{},
+			interfaceIDs:   map[string]struct{}{},
+			integrationIDs: map[string]struct{}{},
 		},
 	)
 }
@@ -671,6 +694,12 @@ func validateResultWithReferences(
 		if integration.Description == "" {
 			return fmt.Errorf("%s has no description", name)
 		}
+		if isInternalLibraryIntegration(integration, references) {
+			return fmt.Errorf(
+				"%s identifies an internal library or abstraction as an external integration",
+				name,
+			)
+		}
 		if err := validateIntegrationLocator(
 			name,
 			integration.Type,
@@ -747,7 +776,8 @@ func validateResultWithReferences(
 			return fmt.Errorf("%s has no interface IDs", name)
 		}
 		for _, interfaceID := range handler.InterfaceIDs {
-			if _, ok := interfaceIDs[interfaceID]; !ok {
+			if _, ok := interfaceIDs[interfaceID]; !ok &&
+				!containsReference(references.interfaceIDs, interfaceID) {
 				return fmt.Errorf("%s references unknown interface %q", name, interfaceID)
 			}
 		}
@@ -766,7 +796,8 @@ func validateResultWithReferences(
 		if _, ok := relationshipTypes[relationship.Type]; !ok {
 			return fmt.Errorf("%s has invalid type %q", name, relationship.Type)
 		}
-		if _, ok := interfaceIDs[relationship.FromInterfaceID]; !ok {
+		if _, ok := interfaceIDs[relationship.FromInterfaceID]; !ok &&
+			!containsReference(references.interfaceIDs, relationship.FromInterfaceID) {
 			return fmt.Errorf(
 				"%s references unknown from interface %q",
 				name,
@@ -780,7 +811,8 @@ func validateResultWithReferences(
 					name,
 				)
 			}
-			if _, ok := integrationIDs[relationship.ToIntegrationID]; !ok {
+			if _, ok := integrationIDs[relationship.ToIntegrationID]; !ok &&
+				!containsReference(references.integrationIDs, relationship.ToIntegrationID) {
 				return fmt.Errorf(
 					"%s references unknown integration %q",
 					name,
@@ -795,7 +827,8 @@ func validateResultWithReferences(
 					relationship.Type,
 				)
 			}
-			if _, ok := interfaceIDs[relationship.ToInterfaceID]; !ok {
+			if _, ok := interfaceIDs[relationship.ToInterfaceID]; !ok &&
+				!containsReference(references.interfaceIDs, relationship.ToInterfaceID) {
 				return fmt.Errorf(
 					"%s references unknown to interface %q",
 					name,
@@ -839,13 +872,33 @@ func validateLocator(
 	if locator.Path == "" &&
 		locator.Command == "" &&
 		locator.Schedule == "" &&
-		locator.Event == "" {
+		locator.Event == "" &&
+		locator.MethodName == "" &&
+		locator.TransportPath == "" {
 		return fmt.Errorf("%s has no usable locator", name)
 	}
 
 	switch interfaceType {
-	case "web_page", "api_endpoint", "form_action", "websocket":
+	case "web_page", "form_action", "websocket":
 		if locator.Path == "" {
+			return fmt.Errorf("%s requires a path locator", name)
+		}
+	case "api_endpoint":
+		if locator.Protocol == "jsonrpc" {
+			if locator.MethodName != "" && locator.TransportPath == "" {
+				return fmt.Errorf(
+					"%s JSON-RPC method locator requires transport_path",
+					name,
+				)
+			}
+			if locator.MethodName == "" &&
+				locator.TransportPath == "" && locator.Path == "" {
+				return fmt.Errorf(
+					"%s JSON-RPC transport locator requires transport_path or path",
+					name,
+				)
+			}
+		} else if locator.Path == "" {
 			return fmt.Errorf("%s requires a path locator", name)
 		}
 	case "cli_command":
@@ -1194,9 +1247,11 @@ func referencesFromFindings(
 	entityFindings *entities.Findings,
 ) priorReferences {
 	references := priorReferences{
-		entityIDs:     map[string]struct{}{},
-		roleIDs:       map[string]struct{}{},
-		permissionIDs: map[string]struct{}{},
+		entityIDs:      map[string]struct{}{},
+		roleIDs:        map[string]struct{}{},
+		permissionIDs:  map[string]struct{}{},
+		interfaceIDs:   map[string]struct{}{},
+		integrationIDs: map[string]struct{}{},
 	}
 
 	if entityFindings != nil {
@@ -1214,4 +1269,83 @@ func referencesFromFindings(
 	}
 
 	return references
+}
+
+func referencesFromAllFindings(
+	architectureFindings *architecture.Findings,
+	authorizationFindings *authorization.Findings,
+	entityFindings *entities.Findings,
+) priorReferences {
+	references := referencesFromFindings(authorizationFindings, entityFindings)
+	references.internalLibraryNames = map[string]struct{}{}
+	if architectureFindings == nil {
+		return references
+	}
+	for _, library := range architectureFindings.Libraries {
+		name := normalizeTechnologyName(library.Name)
+		if name != "" {
+			references.internalLibraryNames[name] = struct{}{}
+		}
+	}
+	return references
+}
+
+func (references priorReferences) withSurface(findings *Findings) priorReferences {
+	copy := references
+	copy.interfaceIDs = cloneIDSet(references.interfaceIDs)
+	copy.integrationIDs = cloneIDSet(references.integrationIDs)
+	if findings != nil {
+		for _, item := range findings.Interfaces {
+			copy.interfaceIDs[item.ID] = struct{}{}
+		}
+		for _, item := range findings.Integrations {
+			copy.integrationIDs[item.ID] = struct{}{}
+		}
+	}
+	return copy
+}
+
+func cloneIDSet(values map[string]struct{}) map[string]struct{} {
+	copy := make(map[string]struct{}, len(values))
+	for value := range values {
+		copy[value] = struct{}{}
+	}
+	return copy
+}
+
+func containsReference(values map[string]struct{}, id string) bool {
+	_, ok := values[id]
+	return ok
+}
+
+func isInternalLibraryIntegration(
+	integration Integration,
+	references priorReferences,
+) bool {
+	if len(references.internalLibraryNames) == 0 ||
+		integration.Type != "database" ||
+		integration.Locator.BaseURL != "" ||
+		integration.Locator.Path != "" ||
+		integration.Locator.Command != "" {
+		return false
+	}
+	name := normalizeTechnologyName(integration.Name)
+	for library := range references.internalLibraryNames {
+		matchesName := name == library || strings.HasPrefix(name, library+" ")
+		if matchesName {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeTechnologyName(value string) string {
+	value = strings.ToLower(value)
+	if index := strings.Index(value, " ("); index >= 0 {
+		value = value[:index]
+	}
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+	return strings.Join(fields, " ")
 }

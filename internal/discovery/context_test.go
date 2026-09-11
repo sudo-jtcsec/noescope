@@ -52,9 +52,17 @@ func TestFeatureContextContainsSemanticGroupingEssentials(t *testing.T) {
 		t.Fatalf("entity essentials missing: %#v", context.Entities)
 	}
 	if context.Surface.Interfaces[0].ID != "project.create" ||
-		context.Surface.Interfaces[0].HandlerNames[0] != "ProjectController::create" ||
-		context.Surface.Interfaces[0].EvidenceIDs[0] != "ev_surface" {
+		context.Surface.Interfaces[0].Evidence == "" {
 		t.Fatalf("surface essentials missing: %#v", context.Surface)
+	}
+	var projectedEvidenceID string
+	for _, profile := range context.Surface.EvidenceProfiles {
+		if profile.ID == context.Surface.Interfaces[0].Evidence {
+			projectedEvidenceID = profile.EvidenceID
+		}
+	}
+	if projectedEvidenceID != "ev_surface" {
+		t.Fatalf("surface evidence profile missing: %#v", context.Surface.EvidenceProfiles)
 	}
 	if context.Surface.Integrations[0].ID != "integration.smtp" {
 		t.Fatalf("minimal integrations missing: %#v", context.Surface.Integrations)
@@ -93,6 +101,7 @@ func TestFeatureContextExcludesSummariesChatAndVerboseCanonicalData(t *testing.T
 		`"confidence"`,
 		"second-evidence-must-be-projected-away",
 		"smtp source detail",
+		"ProjectController::create",
 	} {
 		if strings.Contains(contextText, excluded) {
 			t.Fatalf("feature context contains excluded data %q", excluded)
@@ -136,7 +145,7 @@ func TestFeatureContextProjectionDoesNotMutateCanonicalFindings(t *testing.T) {
 	}
 }
 
-func TestKanboardSizedFeatureProjectionIsSubstantiallySmaller(t *testing.T) {
+func TestFeatureContextHandlesMoreThanOneHundredInterfacesCompactly(t *testing.T) {
 	architectureFindings, authenticationFindings,
 		authorizationFindings, entityFindings := contextFixtures()
 	surfaceFindings := featureSurfaceFixture()
@@ -151,7 +160,7 @@ func TestKanboardSizedFeatureProjectionIsSubstantiallySmaller(t *testing.T) {
 			},
 		)
 	}
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 120; i++ {
 		surfaceFindings.Interfaces = append(surfaceFindings.Interfaces, surface.Interface{
 			ID:          fmt.Sprintf("project.action%03d", i),
 			Type:        "form_action",
@@ -185,6 +194,53 @@ func TestKanboardSizedFeatureProjectionIsSubstantiallySmaller(t *testing.T) {
 	}
 	if projection.ProjectedBytes > maxProjectedContextBytes {
 		t.Fatal("feature projection exceeds preflight threshold")
+	}
+}
+
+func TestFeatureContextRetainsConcreteInterfacesAheadOfRoots(t *testing.T) {
+	architectureFindings, authenticationFindings,
+		authorizationFindings, entityFindings := contextFixtures()
+	surfaceFindings := featureSurfaceFixture()
+	surfaceFindings.Interfaces = append([]surface.Interface{{
+		ID: "api.transport", Type: "api_endpoint", Name: "API transport",
+		Locator:          surface.InterfaceLocator{Protocol: "jsonrpc", TransportPath: "/rpc"},
+		SourceComponents: []surface.SourceComponent{{Path: "rpc.php"}},
+		EvidenceIDs:      []string{"ev_root"},
+	}}, surfaceFindings.Interfaces...)
+	for i := 0; i < 110; i++ {
+		surfaceFindings.Interfaces = append(surfaceFindings.Interfaces, surface.Interface{
+			ID: fmt.Sprintf("api.project.action%03d", i), Type: "api_endpoint",
+			Name: fmt.Sprintf("project.action%03d", i),
+			Locator: surface.InterfaceLocator{
+				Protocol: "jsonrpc", MethodName: fmt.Sprintf("project.action%03d", i),
+				TransportPath: "/rpc",
+			},
+			EntityIDs:        []string{"project"},
+			SourceComponents: []surface.SourceComponent{{Path: "Procedure.php"}},
+			EvidenceIDs:      []string{"ev_surface"},
+		})
+	}
+
+	projection, err := buildFeatureContext(
+		architectureFindings, authenticationFindings, authorizationFindings,
+		entityFindings, surfaceFindings,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var context featureTaskContext
+	if err := json.Unmarshal(projection.Data, &context); err != nil {
+		t.Fatal(err)
+	}
+	if len(context.Surface.Interfaces) != len(surfaceFindings.Interfaces) {
+		t.Fatalf("projection dropped concrete interfaces: %d != %d", len(context.Surface.Interfaces), len(surfaceFindings.Interfaces))
+	}
+	if context.Surface.Interfaces[0].Root || context.Surface.Interfaces[0].ID == "api.transport" {
+		t.Fatalf("root crowded out concrete interfaces: %#v", context.Surface.Interfaces[:2])
+	}
+	last := context.Surface.Interfaces[len(context.Surface.Interfaces)-1]
+	if last.ID != "api.transport" || !last.Root {
+		t.Fatalf("root interface was not retained and deprioritized: %#v", last)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/sudo-jtcsec/noescope/internal/evidence"
 	"github.com/sudo-jtcsec/noescope/internal/investigation"
 	"github.com/sudo-jtcsec/noescope/internal/llm"
+	"github.com/sudo-jtcsec/noescope/internal/model"
 	"github.com/sudo-jtcsec/noescope/internal/repository"
 	runpkg "github.com/sudo-jtcsec/noescope/internal/run"
 	"github.com/sudo-jtcsec/noescope/internal/tools"
@@ -72,6 +73,8 @@ func initCommand() *cobra.Command {
 
 func discoverCommand() *cobra.Command {
 	var throughName string
+	var resumeID string
+	var rerunStage string
 	command := &cobra.Command{
 		Use:   "discover",
 		Short: "Discover and document application functionality",
@@ -119,12 +122,56 @@ func discoverCommand() *cobra.Command {
 				return err
 			}
 
-			currentRun, err := runpkg.Start(
-				projectRoot,
-				"discover",
-			)
-			if err != nil {
-				return err
+			var currentRun *runpkg.Run
+			resume := resumeID != ""
+			if resume {
+				currentRun, err = runpkg.Open(projectRoot, resumeID)
+				if err != nil {
+					return err
+				}
+				if err := currentRun.ValidateRepository(repoInfo.Root, repoInfo.Commit); err != nil {
+					return err
+				}
+				recordedThrough, err := discovery.ParseThrough(currentRun.Through)
+				if err != nil {
+					return fmt.Errorf("run %q has invalid through stage: %w", resumeID, err)
+				}
+				if throughName == "" {
+					through = recordedThrough
+				} else {
+					if err := discovery.ValidateResumeTarget(recordedThrough, through); err != nil {
+						return fmt.Errorf("run %q: %w", resumeID, err)
+					}
+					if through != recordedThrough {
+						if err := currentRun.SetThrough(string(through)); err != nil {
+							return err
+						}
+					}
+				}
+				if rerunStage != "" {
+					if rerunStage != string(discovery.StageFeatures) {
+						return fmt.Errorf("--rerun currently supports only features")
+					}
+					if recordedThrough != discovery.StageFeatures {
+						return fmt.Errorf("--rerun features requires a run targeted through features")
+					}
+					through = discovery.StageFeatures
+				}
+			} else {
+				if rerunStage != "" {
+					return fmt.Errorf("--rerun requires --resume")
+				}
+				currentRun, err = runpkg.StartWithOptions(
+					projectRoot,
+					"discover",
+					runpkg.StartOptions{
+						RepositoryRoot: repoInfo.Root, RepositoryCommit: repoInfo.Commit,
+						Through: string(through),
+					},
+				)
+				if err != nil {
+					return err
+				}
 			}
 
 			registry := tools.NewRegistry()
@@ -136,9 +183,15 @@ func discoverCommand() *cobra.Command {
 				return err
 			}
 
-			evidenceStore := evidence.NewStore(
-				currentRun.Root,
-			)
+			var evidenceStore *evidence.Store
+			if resume {
+				evidenceStore, err = evidence.OpenStore(currentRun.Root)
+				if err != nil {
+					return err
+				}
+			} else {
+				evidenceStore = evidence.NewStore(currentRun.Root)
+			}
 
 			client := llm.NewClient(
 				cfg.AI.BaseURL,
@@ -178,6 +231,21 @@ func discoverCommand() *cobra.Command {
 				currentRun.Root,
 				os.Stdout,
 				through,
+				model.Metadata{
+					ProjectName: cfg.Project.Name,
+					RunID:       currentRun.ID,
+					Source: model.SourceMetadata{
+						Root:      repoInfo.Root,
+						GitBranch: repoInfo.Branch,
+						GitCommit: repoInfo.Commit,
+						GitDirty:  repoInfo.Dirty,
+					},
+					ApplicationURL: cfg.Application.URL,
+				},
+				discovery.Options{
+					Resume: resume, RerunFeatures: rerunStage == string(discovery.StageFeatures),
+					Manifest: currentRun,
+				},
 			)
 		},
 	}
@@ -186,6 +254,18 @@ func discoverCommand() *cobra.Command {
 		"through",
 		"",
 		"run discovery through a stage (architecture, authentication, authorization, entities, surface, features)",
+	)
+	command.Flags().StringVar(
+		&rerunStage,
+		"rerun",
+		"",
+		"rerun a completed terminal stage (currently features)",
+	)
+	command.Flags().StringVar(
+		&resumeID,
+		"resume",
+		"",
+		"resume a compatible failed discovery run",
 	)
 
 	return command

@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,6 +39,36 @@ func NewStore(runRoot string) *Store {
 		),
 		records: make(map[string]Record),
 	}
+}
+
+func OpenStore(runRoot string) (*Store, error) {
+	store := NewStore(runRoot)
+	raw, err := os.ReadFile(store.path)
+	if os.IsNotExist(err) {
+		return store, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read evidence store: %w", err)
+	}
+	lines := bytes.Split(raw, []byte{'\n'})
+	for lineNumber, line := range lines {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var record Record
+		if err := json.Unmarshal(line, &record); err != nil {
+			return nil, fmt.Errorf(
+				"decode evidence store line %d: %w",
+				lineNumber+1,
+				err,
+			)
+		}
+		if record.ID == "" {
+			return nil, fmt.Errorf("evidence store line %d has no ID", lineNumber+1)
+		}
+		store.records[record.ID] = record
+	}
+	return store, nil
 }
 
 func (s *Store) AddDrafts(

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sudo-jtcsec/noescope/internal/investigation"
+	"github.com/sudo-jtcsec/noescope/internal/investigations/authentication"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authorization"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/entities"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
@@ -203,15 +204,15 @@ Every node must include effective access metadata explicitly: authentication is 
 
 Entity IDs and interface IDs must be copied exactly from validated prior findings. Integrations are not interfaces and integration IDs must never appear in interface_ids. Source components are optional and should be included only when they materially clarify the feature; do not duplicate the Surface handler inventory.
 
+The projected Surface marks transport or application roots with root=true and places concrete interfaces first. Locators are compact strings interpreted according to interface type. Each interface's access value refers to access_profiles, whose compact fields are auth, roles, and permissions. Each evidence value refers to evidence_profiles and must be resolved to its canonical evidence_id when cited. Prefer the most specific applicable interface IDs for action nodes. A root interface may support a module or broad feature, but it must not be an action's only mapping when a concrete route, API method, command, job, or consumer in the supplied Surface represents that action.
+
 Use lowercase concise globally unique semantic IDs. Children should normally start with the parent ID followed by a dot, such as projects.members and projects.members.add. Actions cannot have children. Do not generate UUIDs.
 
 Every node must have confidence greater than zero and cite valid run-scoped evidence IDs. Existing evidence IDs included in the projected context may be reused when they support the semantic claim. Use targeted repository reads only when the grouping needs evidence not already available. Unsupported candidates belong under unresolved or should be omitted; an empty feature tree is valid.
 
 Internal analysis or discovery stages must not automatically become separate end-user actions. Treat all examples as classification guidance only, never as evidence about the target repository.
 
-Stop once the major functionality is represented coherently. Do not broadly rediscover the repository or keep reading files merely to enumerate minor actions.
-
-TODO for future large repositories: split feature discovery into a top-level module investigation followed by serial per-module expansion. Do not attempt that segmentation in this v0.1 task.`,
+Stop once the major functionality is represented coherently. Do not broadly rediscover the repository or keep reading files merely to enumerate minor actions.`,
 
 		ToolNames: []string{
 			"repo_info",
@@ -226,12 +227,12 @@ TODO for future large repositories: split feature discovery into a top-level mod
 		ValidateResult: validateResult,
 
 		Budget: investigation.Budget{
-			MaxTurns:           20,
-			MaxToolCalls:       150,
+			MaxTurns:           12,
+			MaxToolCalls:       80,
 			MaxFormatRepairs:   2,
 			MaxSemanticRepairs: 2,
 			FinalizeTurns:      2,
-			MaxDuration:        15 * time.Minute,
+			MaxDuration:        10 * time.Minute,
 		},
 	}
 }
@@ -240,35 +241,15 @@ func Run(
 	ctx context.Context,
 	runner *investigation.Runner,
 	taskContext json.RawMessage,
+	authenticationFindings *authentication.Findings,
 	authorizationFindings *authorization.Findings,
 	entityFindings *entities.Findings,
 	surfaceFindings *surface.Findings,
 ) (*Findings, *investigation.Result, error) {
-	references := referencesFromFindings(
-		authorizationFindings,
-		entityFindings,
-		surfaceFindings,
+	return RunWithOptions(
+		ctx, runner, taskContext, authenticationFindings, authorizationFindings,
+		entityFindings, surfaceFindings, RunOptions{},
 	)
-
-	task := Task()
-	task.Context = append(json.RawMessage(nil), taskContext...)
-	task.ValidateResult = func(
-		result *investigation.Result,
-		evidence investigation.EvidenceLookup,
-	) error {
-		return validateResultWithReferences(result, evidence, references)
-	}
-
-	result, err := runner.Run(ctx, task)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	findings, err := decodeFindings(result.Findings)
-	if err != nil {
-		return nil, result, err
-	}
-	return findings, result, nil
 }
 
 func validateResult(

@@ -39,3 +39,16 @@ func TestParseThroughRejectsUnknownStage(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestValidateResumeTargetAllowsForwardExtensionAndRejectsBackward(t *testing.T) {
+	if err := ValidateResumeTarget(StageSurface, StageFeatures); err != nil {
+		t.Fatalf("forward resume extension rejected: %v", err)
+	}
+	if err := ValidateResumeTarget(StageFeatures, StageFeatures); err != nil {
+		t.Fatalf("unchanged resume target rejected: %v", err)
+	}
+	if err := ValidateResumeTarget(StageFeatures, StageAuthentication); err == nil ||
+		!strings.Contains(err.Error(), "backward") {
+		t.Fatalf("expected backward target rejection, got %v", err)
+	}
+}
