@@ -200,6 +200,18 @@ func (r *Run) BeginFeatureRerun() error {
 	return Save(r)
 }
 
+func (r *Run) BeginSurfaceRerun() error {
+	r.FeatureAttempt++
+	completed := r.CompletedStages[:0]
+	for _, stage := range r.CompletedStages {
+		if stage != "surface" && stage != "features" {
+			completed = append(completed, stage)
+		}
+	}
+	r.CompletedStages = completed
+	return Save(r)
+}
+
 func (r *Run) SetSurfaceShard(taskID string, state SurfaceShardState) error {
 	if r.Surface == nil {
 		r.Surface = map[string]SurfaceShardState{}

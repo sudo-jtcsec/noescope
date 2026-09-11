@@ -18,6 +18,7 @@ const checkpointSchemaVersion = "1"
 
 type RunOptions struct {
 	RunRoot          string
+	RepositoryRoot   string
 	RepositoryCommit string
 	Resume           bool
 	Manifest         *runpkg.Run

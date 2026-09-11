@@ -42,6 +42,7 @@ type categoryTaskSpec struct {
 	suffix        string
 	instructions  string
 	candidates    []string
+	webRoutes     []webRouteCandidate
 	includeShared bool
 	depth         int
 }
@@ -232,8 +233,12 @@ func apiTaskSpec(
 	}
 }
 
-func splitCategoryTaskSpec(spec categoryTaskSpec) (categoryTaskSpec, categoryTaskSpec) {
+func splitCategoryTaskSpec(category Category, spec categoryTaskSpec) (categoryTaskSpec, categoryTaskSpec) {
 	middle := (len(spec.candidates) + 1) / 2
+	if category == CategoryWeb {
+		return webTaskSpec(spec.suffix+".1", spec.webRoutes[:middle], spec.depth+1),
+			webTaskSpec(spec.suffix+".2", spec.webRoutes[middle:], spec.depth+1)
+	}
 	left := apiTaskSpec(
 		spec.suffix+".1",
 		spec.candidates[:middle],
@@ -375,6 +380,25 @@ func runCategoryCoordinator(
 		Interfaces: []Interface{}, Integrations: []Integration{},
 		Handlers: []Handler{}, Relationships: []Relationship{},
 	}
+	webDiscovery := webRouteDiscovery{Sources: []string{}, Candidates: []webRouteCandidate{}}
+	if applicableSet[CategoryWeb] {
+		repositoryRoot := runOptions.RepositoryRoot
+		if repositoryRoot == "" && runOptions.Manifest != nil {
+			repositoryRoot = runOptions.Manifest.RepositoryRoot
+		}
+		var err error
+		webDiscovery, err = discoverWebRoutes(repositoryRoot)
+		if err != nil {
+			return nil, nil, err
+		}
+		if logf != nil {
+			logf("[surface.web] applicable=true")
+			logf("[surface.web] route sources=%d", len(webDiscovery.Sources))
+			logf("[surface.web] extracted candidates=%d", len(webDiscovery.Candidates))
+		}
+	} else if logf != nil {
+		logf("[surface.web] applicable=false")
+	}
 
 	for _, category := range categoryOrder {
 		if category == CategoryBackground &&
@@ -395,6 +419,12 @@ func runCategoryCoordinator(
 		}
 		categoryCoverage := CategoryCoverage{Applicable: true, Status: "completed"}
 		specs := categoryTaskSpecs(category, baseContext)
+		if category == CategoryWeb {
+			specs = webTaskSpecs(webDiscovery.Candidates)
+			if logf != nil {
+				logf("[surface.web] groups=%d", len(specs))
+			}
+		}
 		executedShards := 0
 		for index, spec := range specs {
 			if logf != nil {
@@ -478,7 +508,7 @@ func executeCategoryShard(
 					task.ID,
 				)
 			}
-			left, right := splitCategoryTaskSpec(spec)
+			left, right := splitCategoryTaskSpec(category, spec)
 			completedLeft, err := executeCategoryShard(
 				ctx, execute, evidence, logf, baseContext, category, left,
 				references, coverage, checkpoints, outputs, mergedSoFar,
@@ -513,6 +543,11 @@ func executeCategoryShard(
 		findings, err := decodeFindings(result.Findings)
 		if err != nil {
 			return investigation.NewSubmissionFormatError(err)
+		}
+		if category == CategoryWeb {
+			if err := validateWebCandidateCoverage(findings, spec.webRoutes); err != nil {
+				return err
+			}
 		}
 		_, err = mergeCategoryFindings([]categoryOutput{
 			{findings: *mergedSoFar},
@@ -641,7 +676,7 @@ func splitFailedCategoryShard(
 		)
 	}
 
-	left, right := splitCategoryTaskSpec(spec)
+	left, right := splitCategoryTaskSpec(category, spec)
 	leftID := taskForCategorySpec(category, left).ID
 	rightID := taskForCategorySpec(category, right).ID
 	if err := checkpoints.setState(taskID, runpkg.SurfaceShardState{

@@ -159,6 +159,7 @@ func Verify(ctx context.Context, options VerifyOptions) (resultErr error) {
 
 	attempted := map[string]struct{}{}
 	deferredAuthenticated := make([]verificationCandidate, 0)
+	loginURLs := loginCandidateURLs(options.Application, options.Runtime.BaseURL)
 	for pass := 0; pass < 2; pass++ {
 		for _, candidate := range candidates {
 			hasParameters := len(routeParameterNames(interfaceRoute(candidate.item))) > 0
@@ -168,10 +169,13 @@ func Verify(ctx context.Context, options VerifyOptions) (resultErr error) {
 			if len(attempted) >= options.MaxInterfaces {
 				continue
 			}
-			observation := verifyInterface(ctx, options, state, candidate.item, candidate.classification, "unauthenticated")
+			observation := verifyInterface(
+				ctx, options, state, candidate.item, candidate.classification,
+				"unauthenticated", loginURLs,
+			)
 			options.Runtime.Interfaces = append(options.Runtime.Interfaces, observation)
 			attempted[candidate.item.ID] = struct{}{}
-			if requiresAuthentication(candidate.item) {
+			if requiresAuthentication(candidate.item) || observation.Status == StatusAuthRequired {
 				deferredAuthenticated = append(deferredAuthenticated, candidate)
 			}
 		}
@@ -201,7 +205,10 @@ func Verify(ctx context.Context, options VerifyOptions) (resultErr error) {
 	if options.Runtime.Authentication.Status == StatusVerified {
 		state.Authenticated = true
 		for _, candidate := range deferredAuthenticated {
-			observation := verifyInterface(ctx, options, state, candidate.item, candidate.classification, "authenticated")
+			observation := verifyInterface(
+				ctx, options, state, candidate.item, candidate.classification,
+				"authenticated", loginURLs,
+			)
 			options.Runtime.Interfaces = append(options.Runtime.Interfaces, observation)
 		}
 	}
@@ -213,11 +220,14 @@ func Verify(ctx context.Context, options VerifyOptions) (resultErr error) {
 	normalizeRuntime(options.Runtime)
 	if options.Logf != nil {
 		summary := Summarize(options.Runtime)
-		options.Logf(
-			"[runtime] interfaces: attempted=%d verified=%d skipped_mutating=%d requires_binding=%d",
-			summary.SafeInterfacesAttempted, summary.Verified,
-			summary.SkippedMutating, summary.RequiresBinding,
-		)
+		options.Logf("[runtime] interfaces:")
+		options.Logf("  selected=%d", summary.SelectedInterfaces)
+		options.Logf("  observations=%d", summary.Observations)
+		options.Logf("  verified=%d", summary.Verified)
+		options.Logf("  auth_required=%d", summary.AuthRequired)
+		options.Logf("  contradicted=%d", summary.Contradicted)
+		options.Logf("  skipped_mutating=%d", summary.SkippedMutating)
+		options.Logf("  requires_binding=%d", summary.RequiresBinding)
 	}
 	if err := ValidateRuntime(options.Application, options.Runtime, options.Evidence); err != nil {
 		MarkFailure(
@@ -354,6 +364,7 @@ func verifyInterface(
 	item surface.Interface,
 	classification SafetyClassification,
 	browserState string,
+	loginURLs []string,
 ) InterfaceObservation {
 	result := InterfaceObservation{
 		InterfaceID: item.ID, State: browserState, Safety: classification.Safety,
@@ -428,34 +439,66 @@ func verifyInterface(
 			Text: options.Redactor.String(element.Text),
 		})
 	}
-	loginRedirect := isLoginPage(page)
-	switch {
-	case page.HTTPStatus == 404:
-		result.Status = StatusNotFound
-		result.Reason = "runtime returned HTTP 404"
+	result.Status, result.Reason = classifyInterfacePage(
+		item, browserState, resolution.URL, page, loginURLs,
+	)
+	if result.Status == StatusNotFound || result.Status == StatusRuntimeError ||
+		result.Status == StatusContradicted {
 		captureFailureScreenshot(options, item.ID, &result)
-	case page.HTTPStatus >= 400:
-		result.Status = StatusRuntimeError
-		result.Reason = fmt.Sprintf("runtime returned HTTP %d", page.HTTPStatus)
-		captureFailureScreenshot(options, item.ID, &result)
-	case browserState == "unauthenticated" && requiresAuthentication(item) && !loginRedirect:
-		result.Status = StatusContradicted
-		result.Reason = "source requires authentication but the interface was reachable anonymously"
-	case loginRedirect:
-		if item.Access != nil && item.Access.Authentication == "not_required" {
-			result.Status = StatusContradicted
-			result.Reason = "source marks interface public but runtime required authentication"
-		} else {
-			result.Status = StatusAuthRequired
-			result.Reason = "runtime redirected to a login form"
-		}
-	case differentURL(resolution.URL, page.FinalURL):
-		result.Status = StatusRedirected
-		result.Reason = "runtime navigated to a different URL"
-	default:
-		result.Status = StatusVerified
 	}
 	return result
+}
+
+func classifyInterfacePage(
+	item surface.Interface,
+	browserState string,
+	requestedURL string,
+	page browser.Page,
+	loginURLs []string,
+) (Status, string) {
+	loginFormPresent := false
+	if _, ok := browser.DetectLoginForm(page); ok {
+		loginFormPresent = true
+	}
+	requestedLoginSurface := matchesLoginSurface(requestedURL, loginURLs)
+	finalLoginSurface := matchesLoginSurface(page.FinalURL, loginURLs)
+	interceptedByLogin := !requestedLoginSurface && finalLoginSurface &&
+		differentURL(requestedURL, page.FinalURL)
+	public := item.Access != nil && item.Access.Authentication == "not_required"
+	switch {
+	case page.HTTPStatus == 404:
+		return StatusNotFound, "runtime returned HTTP 404"
+	case page.HTTPStatus == 401 || page.HTTPStatus == 403:
+		if public {
+			return StatusContradicted, fmt.Sprintf(
+				"source marks interface public but runtime returned HTTP %d",
+				page.HTTPStatus,
+			)
+		}
+		return StatusAuthRequired, fmt.Sprintf(
+			"runtime returned HTTP %d before authentication", page.HTTPStatus,
+		)
+	case page.HTTPStatus >= 400:
+		return StatusRuntimeError, fmt.Sprintf("runtime returned HTTP %d", page.HTTPStatus)
+	case browserState == "unauthenticated" && interceptedByLogin:
+		if public {
+			return StatusContradicted, "source marks interface public but runtime redirected to the login surface"
+		}
+		return StatusAuthRequired, "runtime redirected to the login surface"
+	case browserState == "unauthenticated" && requestedLoginSurface && finalLoginSurface:
+		if requiresAuthentication(item) {
+			return StatusContradicted, "source requires authentication but its login surface was reachable anonymously"
+		}
+		return StatusVerified, ""
+	case browserState == "unauthenticated" && loginFormPresent && !public:
+		return StatusUnknown, "login form observed at the requested URL without redirect evidence"
+	case browserState == "unauthenticated" && requiresAuthentication(item):
+		return StatusContradicted, "source requires authentication but the interface was reachable anonymously"
+	case differentURL(requestedURL, page.FinalURL):
+		return StatusRedirected, "runtime navigated to a different URL"
+	default:
+		return StatusVerified, ""
+	}
 }
 
 func recordPageEvidence(
@@ -620,12 +663,31 @@ func requiresAuthentication(item surface.Interface) bool {
 	return item.Access != nil && item.Access.Authentication == "required"
 }
 
-func isLoginPage(page browser.Page) bool {
-	if _, ok := browser.DetectLoginForm(page); ok {
-		return true
+func matchesLoginSurface(target string, loginURLs []string) bool {
+	targetURL, err := url.Parse(target)
+	if err != nil {
+		return false
 	}
-	parsed, _ := url.Parse(page.FinalURL)
-	return strings.Contains(strings.ToLower(parsed.Path), "login")
+	for _, candidate := range loginURLs {
+		candidateURL, candidateErr := url.Parse(candidate)
+		if candidateErr != nil {
+			continue
+		}
+		if strings.EqualFold(targetURL.Scheme, candidateURL.Scheme) &&
+			strings.EqualFold(targetURL.Host, candidateURL.Host) &&
+			normalizedURLPath(targetURL.Path) == normalizedURLPath(candidateURL.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedURLPath(value string) string {
+	value = strings.TrimRight(value, "/")
+	if value == "" {
+		return "/"
+	}
+	return value
 }
 
 func differentURL(left, right string) bool {

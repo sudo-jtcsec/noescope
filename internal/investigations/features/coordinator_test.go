@@ -44,6 +44,55 @@ func TestModuleDiscoveryAcceptsOnlyModuleScaffoldsWithConcreteAssignments(t *tes
 	assertValidationError(t, err, "only root")
 }
 
+func TestModuleDiscoveryReportsAllInvalidCanonicalReferencesTogether(t *testing.T) {
+	references := priorReferences{
+		entityIDs:      map[string]struct{}{"task": {}},
+		interfaceIDs:   map[string]struct{}{"api.task.getall": {}},
+		integrationIDs: map[string]struct{}{},
+		roleIDs:        map[string]struct{}{"app_user": {}},
+		permissionIDs:  map[string]struct{}{"project_view": {}},
+	}
+	module := coordinatorModule("tasks", "Tasks", []string{"api.task.getAll"})
+	module.EntityIDs = []string{"subtask"}
+	module.Access.RoleIDs = []string{"user"}
+	module.Access.PermissionIDs = []string{"task_view"}
+
+	err := validateModuleCanonicalReferences([]Node{module}, references)
+	for _, want := range []string{
+		`unknown entities ["subtask"]`,
+		`unknown interfaces ["api.task.getAll"]`,
+		`unknown roles ["user"]`,
+		`unknown permissions ["task_view"]`,
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestCanonicalInterfaceCaseNormalizationIsUniqueAndStrict(t *testing.T) {
+	nodes := []Node{{
+		InterfaceIDs: []string{
+			"api.swimlane.getActive",
+			"api.task.missing",
+			"API.COLLISION",
+		},
+	}}
+	normalizeCanonicalInterfaceReferences(nodes, map[string]struct{}{
+		"api.swimlane.getactive": {},
+		"api.collision":          {},
+		"API.Collision":          {},
+	})
+	want := []string{
+		"api.swimlane.getactive",
+		"api.task.missing",
+		"API.COLLISION",
+	}
+	if !reflect.DeepEqual(nodes[0].InterfaceIDs, want) {
+		t.Fatalf("normalized IDs = %v, want %v", nodes[0].InterfaceIDs, want)
+	}
+}
+
 func TestCoordinatorExpandsModulesSeriallyInDeterministicOrder(t *testing.T) {
 	surfaceFindings := coordinatorSurfaceFixture()
 	tasks := coordinatorModule("tasks", "Tasks", []string{"api.task.create"})

@@ -130,7 +130,7 @@ func TestResumeExtendsSurfaceToFeaturesWithoutCallingCompletedStages(t *testing.
 	if err := resumeThrough(
 		context.Background(), runner, runRoot, &output, StageFeatures,
 		model.Metadata{RunID: manifest.ID, Source: model.SourceMetadata{GitCommit: "commit-one"}},
-		manifest, false,
+		manifest, false, false,
 	); err != nil {
 		t.Fatal(err)
 	}

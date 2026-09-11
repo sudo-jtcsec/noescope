@@ -21,6 +21,7 @@ import (
 
 type Options struct {
 	Resume        bool
+	RerunSurface  bool
 	RerunFeatures bool
 	Manifest      *runpkg.Run
 }
@@ -51,7 +52,7 @@ func RunThrough(
 	if runOptions.Resume {
 		return resumeThrough(
 			ctx, runner, runRoot, out, through, metadata, runOptions.Manifest,
-			runOptions.RerunFeatures,
+			runOptions.RerunSurface, runOptions.RerunFeatures,
 		)
 	}
 	if out == nil {
@@ -239,8 +240,9 @@ func RunThrough(
 		authorizationFindings,
 		entityFindings,
 		surface.RunOptions{
-			RunRoot: runRoot, RepositoryCommit: metadata.Source.GitCommit,
-			Manifest: runOptions.Manifest,
+			RunRoot: runRoot, RepositoryRoot: metadata.Source.Root,
+			RepositoryCommit: metadata.Source.GitCommit,
+			Manifest:         runOptions.Manifest,
 		},
 	)
 	if err != nil {
@@ -366,6 +368,7 @@ func resumeThrough(
 	through Stage,
 	metadata model.Metadata,
 	manifest *runpkg.Run,
+	rerunSurface bool,
 	rerunFeatures bool,
 ) error {
 	if out == nil {
@@ -432,6 +435,12 @@ func resumeThrough(
 	} {
 		fmt.Fprintf(out, "[%s] reused validated canonical stage output\n", stage)
 	}
+	if rerunSurface && manifest.StageCompleted(string(StageSurface)) {
+		if err := manifest.BeginSurfaceRerun(); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "[surface] invalidated canonical Surface and dependent Feature stages for rerun")
+	}
 
 	var surfaceFindings *surface.Findings
 	var surfaceResult *investigation.Result
@@ -471,8 +480,9 @@ func resumeThrough(
 			authorizationFindings,
 			entityFindings,
 			surface.RunOptions{
-				RunRoot: runRoot, RepositoryCommit: metadata.Source.GitCommit,
-				Resume: true, Manifest: manifest,
+				RunRoot: runRoot, RepositoryRoot: metadata.Source.Root,
+				RepositoryCommit: metadata.Source.GitCommit,
+				Resume:           true, Manifest: manifest,
 			},
 		)
 		if err != nil {

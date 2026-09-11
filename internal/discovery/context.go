@@ -127,21 +127,36 @@ type featureAccessContextView struct {
 }
 
 type featureInterfaceContextView struct {
-	ID        string   `json:"id"`
-	Type      string   `json:"type"`
-	Name      string   `json:"name,omitempty"`
-	Locator   string   `json:"locator"`
-	Access    string   `json:"access,omitempty"`
-	EntityIDs []string `json:"entities,omitempty"`
-	Evidence  string   `json:"evidence,omitempty"`
-	Root      bool     `json:"root,omitempty"`
+	ID      string
+	Type    string
+	Locator string
+	Access  string
 }
 
-type featureRelationshipContextView struct {
-	Type            string `json:"type"`
-	FromInterfaceID string `json:"from_interface_id"`
-	ToInterfaceID   string `json:"to_interface_id,omitempty"`
-	ToIntegrationID string `json:"to_integration_id,omitempty"`
+// Feature module discovery needs the complete canonical interface inventory,
+// but repeated object field names make large route tables needlessly exceed the
+// immutable-context budget. Encode each entry as a row whose columns are named
+// once by featureSurfaceContextView.InterfaceFields. Module expansion later
+// projects the full metadata for only the interfaces assigned to that module.
+func (view featureInterfaceContextView) MarshalJSON() ([]byte, error) {
+	return json.Marshal([4]string{
+		view.ID,
+		view.Type,
+		view.Locator,
+		view.Access,
+	})
+}
+
+func (view *featureInterfaceContextView) UnmarshalJSON(data []byte) error {
+	var row [4]string
+	if err := json.Unmarshal(data, &row); err != nil {
+		return err
+	}
+	view.ID = row[0]
+	view.Type = row[1]
+	view.Locator = row[2]
+	view.Access = row[3]
+	return nil
 }
 
 type featureIntegrationContextView struct {
@@ -151,11 +166,12 @@ type featureIntegrationContextView struct {
 }
 
 type featureSurfaceContextView struct {
-	AccessProfiles   []featureAccessProfileContextView   `json:"access_profiles"`
-	EvidenceProfiles []featureEvidenceProfileContextView `json:"evidence_profiles"`
-	Interfaces       []featureInterfaceContextView       `json:"interfaces"`
-	Relationships    []featureRelationshipContextView    `json:"relationships"`
-	Integrations     []featureIntegrationContextView     `json:"integrations"`
+	AccessProfiles   []featureAccessProfileContextView `json:"access_profiles"`
+	TypeProfiles     []featureTypeProfileContextView   `json:"interface_type_profiles"`
+	InterfaceFields  []string                          `json:"interface_fields"`
+	Interfaces       []featureInterfaceContextView     `json:"interfaces"`
+	RootInterfaceIDs []string                          `json:"root_interface_ids,omitempty"`
+	Integrations     []featureIntegrationContextView   `json:"integrations"`
 }
 
 type featureAccessProfileContextView struct {
@@ -163,9 +179,9 @@ type featureAccessProfileContextView struct {
 	featureAccessContextView
 }
 
-type featureEvidenceProfileContextView struct {
-	ID         string `json:"id"`
-	EvidenceID string `json:"evidence_id"`
+type featureTypeProfileContextView struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
 }
 
 type featureTaskContext struct {
@@ -343,19 +359,17 @@ func projectFeatureEntities(findings *entities.Findings) []featureEntityContextV
 
 func projectFeatureSurface(findings *surface.Findings) featureSurfaceContextView {
 	accessProfiles, accessProfileIDs := projectFeatureAccessProfiles(findings.Interfaces)
-	evidenceProfiles, evidenceProfileIDs := projectFeatureEvidenceProfiles(findings.Interfaces)
+	typeProfiles, typeProfileIDs := projectFeatureTypeProfiles(findings.Interfaces)
 	view := featureSurfaceContextView{
-		AccessProfiles:   accessProfiles,
-		EvidenceProfiles: evidenceProfiles,
+		AccessProfiles: accessProfiles,
+		TypeProfiles:   typeProfiles,
+		InterfaceFields: []string{
+			"canonical_id", "type_profile", "compact_locator", "access_profile",
+		},
 		Interfaces: make(
 			[]featureInterfaceContextView,
 			0,
 			len(findings.Interfaces),
-		),
-		Relationships: make(
-			[]featureRelationshipContextView,
-			0,
-			len(findings.Relationships),
 		),
 		Integrations: make(
 			[]featureIntegrationContextView,
@@ -374,34 +388,17 @@ func projectFeatureSurface(findings *surface.Findings) featureSurfaceContextView
 	})
 	for _, item := range interfaces {
 		projected := featureInterfaceContextView{
-			ID: item.ID, Type: item.Type,
-			Name:      compactInterfaceName(item),
-			Locator:   compactInterfaceLocator(item),
-			EntityIDs: append([]string(nil), item.EntityIDs...),
-			Evidence:  evidenceProfileIDs[firstString(item.EvidenceIDs)],
-			Root:      features.IsRootInterface(item),
+			ID:      item.ID,
+			Type:    typeProfileIDs[item.Type],
+			Locator: compactInterfaceLocator(item),
 		}
 		if item.Access != nil {
 			projected.Access = accessProfileIDs[featureAccessKey(item.Access)]
 		}
 		view.Interfaces = append(view.Interfaces, projected)
-	}
-	for _, relationship := range findings.Relationships {
-		// Concrete invocation interfaces carry the information Feature Discovery
-		// needs for semantic mapping. Retain outbound dependency edges, but omit
-		// command-flow topology that would repeat those invocation points.
-		if relationship.Type != "integration_call" {
-			continue
+		if features.IsRootInterface(item) {
+			view.RootInterfaceIDs = append(view.RootInterfaceIDs, item.ID)
 		}
-		view.Relationships = append(
-			view.Relationships,
-			featureRelationshipContextView{
-				Type:            relationship.Type,
-				FromInterfaceID: relationship.FromInterfaceID,
-				ToInterfaceID:   relationship.ToInterfaceID,
-				ToIntegrationID: relationship.ToIntegrationID,
-			},
-		)
 	}
 	for _, integration := range findings.Integrations {
 		view.Integrations = append(view.Integrations, featureIntegrationContextView{
@@ -443,27 +440,25 @@ func projectFeatureAccessProfiles(
 	return profiles, profileIDs
 }
 
-func projectFeatureEvidenceProfiles(
+func projectFeatureTypeProfiles(
 	interfaces []surface.Interface,
-) ([]featureEvidenceProfileContextView, map[string]string) {
+) ([]featureTypeProfileContextView, map[string]string) {
 	unique := make(map[string]struct{})
 	for _, item := range interfaces {
-		if evidenceID := firstString(item.EvidenceIDs); evidenceID != "" {
-			unique[evidenceID] = struct{}{}
-		}
+		unique[item.Type] = struct{}{}
 	}
-	evidenceIDs := make([]string, 0, len(unique))
-	for evidenceID := range unique {
-		evidenceIDs = append(evidenceIDs, evidenceID)
+	types := make([]string, 0, len(unique))
+	for interfaceType := range unique {
+		types = append(types, interfaceType)
 	}
-	sort.Strings(evidenceIDs)
-	profiles := make([]featureEvidenceProfileContextView, 0, len(evidenceIDs))
-	profileIDs := make(map[string]string, len(evidenceIDs))
-	for index, evidenceID := range evidenceIDs {
-		id := fmt.Sprintf("e%d", index+1)
-		profileIDs[evidenceID] = id
-		profiles = append(profiles, featureEvidenceProfileContextView{
-			ID: id, EvidenceID: evidenceID,
+	sort.Strings(types)
+	profiles := make([]featureTypeProfileContextView, 0, len(types))
+	profileIDs := make(map[string]string, len(types))
+	for index, interfaceType := range types {
+		id := fmt.Sprintf("t%d", index+1)
+		profileIDs[interfaceType] = id
+		profiles = append(profiles, featureTypeProfileContextView{
+			ID: id, Type: interfaceType,
 		})
 	}
 	return profiles, profileIDs
@@ -480,20 +475,6 @@ func featureAccessKey(access *surface.Access) string {
 	}
 	raw, _ := json.Marshal(value)
 	return string(raw)
-}
-
-func compactInterfaceName(item surface.Interface) string {
-	for _, redundant := range []string{
-		item.ID,
-		strings.TrimPrefix(item.ID, strings.SplitN(item.ID, ".", 2)[0]+"."),
-		item.Locator.MethodName,
-		item.Locator.Command,
-	} {
-		if redundant != "" && strings.EqualFold(item.Name, redundant) {
-			return ""
-		}
-	}
-	return item.Name
 }
 
 func compactInterfaceLocator(item surface.Interface) string {
@@ -549,13 +530,6 @@ func firstEvidenceID(evidenceIDs []string) []string {
 		return nil
 	}
 	return []string{evidenceIDs[0]}
-}
-
-func firstString(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
 }
 
 func projectArchitecture(

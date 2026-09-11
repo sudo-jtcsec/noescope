@@ -150,13 +150,20 @@ func discoverCommand() *cobra.Command {
 					}
 				}
 				if rerunStage != "" {
-					if rerunStage != string(discovery.StageFeatures) {
-						return fmt.Errorf("--rerun currently supports only features")
+					if rerunStage != string(discovery.StageFeatures) &&
+						rerunStage != string(discovery.StageSurface) {
+						return fmt.Errorf("--rerun currently supports surface or features")
 					}
-					if recordedThrough != discovery.StageFeatures {
+					if rerunStage == string(discovery.StageFeatures) && recordedThrough != discovery.StageFeatures {
 						return fmt.Errorf("--rerun features requires a run targeted through features")
 					}
+					if rerunStage == string(discovery.StageSurface) && recordedThrough.Count() < discovery.StageSurface.Count() {
+						return fmt.Errorf("--rerun surface requires a run targeted through surface or features")
+					}
 					through = discovery.StageFeatures
+					if recordedThrough == discovery.StageSurface {
+						through = discovery.StageSurface
+					}
 				}
 			} else {
 				if rerunStage != "" {
@@ -244,8 +251,9 @@ func discoverCommand() *cobra.Command {
 					ApplicationURL: cfg.Application.URL,
 				},
 				discovery.Options{
-					Resume: resume, RerunFeatures: rerunStage == string(discovery.StageFeatures),
-					Manifest: currentRun,
+					Resume: resume, RerunSurface: rerunStage == string(discovery.StageSurface),
+					RerunFeatures: rerunStage == string(discovery.StageFeatures),
+					Manifest:      currentRun,
 				},
 			)
 		},
@@ -260,7 +268,7 @@ func discoverCommand() *cobra.Command {
 		&rerunStage,
 		"rerun",
 		"",
-		"rerun a completed terminal stage (currently features)",
+		"rerun Surface (and dependent Features) or the completed Feature stage",
 	)
 	command.Flags().StringVar(
 		&resumeID,

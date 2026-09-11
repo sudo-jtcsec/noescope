@@ -1,6 +1,7 @@
 package run
 
 import (
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +138,53 @@ func TestBeginFeatureRerunPreservesRunAndPriorStageCompletion(t *testing.T) {
 		}
 		if string(got) != string(want) {
 			t.Fatalf("Feature rerun changed canonical %s output", stage)
+		}
+	}
+}
+
+func TestBeginSurfaceRerunPreservesPrerequisiteArtifactsAndRunID(t *testing.T) {
+	projectRoot := t.TempDir()
+	created, err := StartWithOptions(projectRoot, "discover", StartOptions{
+		RepositoryRoot: "/source", RepositoryCommit: "commit-one", Through: "features",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.CompletedStages = []string{
+		"architecture", "authentication", "authorization", "entities", "surface", "features",
+	}
+	if err := Save(created); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string][32]byte{}
+	for _, stage := range []string{"architecture", "authentication", "authorization", "entities"} {
+		path := filepath.Join(created.Root, "output", stage+".json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		contents := []byte("canonical-" + stage)
+		if err := os.WriteFile(path, contents, 0644); err != nil {
+			t.Fatal(err)
+		}
+		before[stage] = sha256.Sum256(contents)
+	}
+	runID := created.ID
+	if err := created.BeginSurfaceRerun(); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != runID || created.StageCompleted("surface") || created.StageCompleted("features") {
+		t.Fatalf("Surface rerun did not invalidate only dependent stages: %#v", created)
+	}
+	for _, stage := range []string{"architecture", "authentication", "authorization", "entities"} {
+		if !created.StageCompleted(stage) {
+			t.Fatalf("prerequisite stage %s was invalidated", stage)
+		}
+		contents, err := os.ReadFile(filepath.Join(created.Root, "output", stage+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sha256.Sum256(contents) != before[stage] {
+			t.Fatalf("prerequisite artifact %s changed", stage)
 		}
 	}
 }

@@ -130,9 +130,12 @@ type ConsoleObservation struct {
 }
 
 type Summary struct {
+	SelectedInterfaces      int
+	Observations            int
 	SafeInterfacesAttempted int
 	Verified                int
 	AuthRequired            int
+	Contradicted            int
 	Redirected              int
 	Failed                  int
 	SkippedMutating         int
@@ -142,21 +145,24 @@ type Summary struct {
 
 func Summarize(runtime *Runtime) Summary {
 	var result Summary
-	seenAttempts := map[string]struct{}{}
+	selected := map[string]struct{}{}
 	for _, item := range runtime.Interfaces {
+		if item.State != "not_attempted" {
+			selected[item.InterfaceID] = struct{}{}
+			result.Observations++
+		}
 		switch item.Status {
 		case StatusVerified:
 			result.Verified++
-			seenAttempts[item.InterfaceID] = struct{}{}
 		case StatusAuthRequired:
 			result.AuthRequired++
-			seenAttempts[item.InterfaceID] = struct{}{}
 		case StatusRedirected:
 			result.Redirected++
-			seenAttempts[item.InterfaceID] = struct{}{}
-		case StatusNotFound, StatusRuntimeError, StatusContradicted:
+		case StatusContradicted:
+			result.Contradicted++
 			result.Failed++
-			seenAttempts[item.InterfaceID] = struct{}{}
+		case StatusNotFound, StatusRuntimeError:
+			result.Failed++
 		case StatusRequiresRuntimeBinding:
 			result.RequiresBinding++
 		case StatusNotAttempted, StatusUnsafe:
@@ -167,6 +173,7 @@ func Summarize(runtime *Runtime) Summary {
 			}
 		}
 	}
-	result.SafeInterfacesAttempted = len(seenAttempts)
+	result.SelectedInterfaces = len(selected)
+	result.SafeInterfacesAttempted = len(selected)
 	return result
 }

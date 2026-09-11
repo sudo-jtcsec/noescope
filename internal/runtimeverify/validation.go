@@ -65,6 +65,7 @@ func ValidateRuntime(
 	if err := validateEvidence(runtime.Authentication.EvidenceIDs, evidence); err != nil {
 		return fmt.Errorf("authentication observation: %w", err)
 	}
+	observationKeys := make(map[string]int, len(runtime.Interfaces))
 	for index, item := range runtime.Interfaces {
 		if _, ok := interfaceIDs[item.InterfaceID]; !ok {
 			return fmt.Errorf("runtime interfaces[%d] references unknown canonical interface %q", index, item.InterfaceID)
@@ -76,6 +77,14 @@ func ValidateRuntime(
 			item.State != "not_attempted" {
 			return fmt.Errorf("interfaces[%d] has invalid browser state %q", index, item.State)
 		}
+		key := item.InterfaceID + "\x00" + item.State
+		if previous, exists := observationKeys[key]; exists {
+			return fmt.Errorf(
+				"runtime interfaces[%d] duplicates interface_id %q and state %q from interfaces[%d]",
+				index, item.InterfaceID, item.State, previous,
+			)
+		}
+		observationKeys[key] = index
 		if err := validateEvidence(item.EvidenceIDs, evidence); err != nil {
 			return fmt.Errorf("interfaces[%d]: %w", index, err)
 		}

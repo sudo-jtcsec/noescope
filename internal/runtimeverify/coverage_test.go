@@ -81,3 +81,65 @@ func TestFeatureCoverageIsDeterministic(t *testing.T) {
 		t.Fatalf("coverage is not deterministic: %#v / %#v", first, second)
 	}
 }
+
+func TestFeatureCoveragePrefersAuthenticatedVerificationOverExpectedAuthWall(t *testing.T) {
+	application := &model.Application{
+		Surface: surface.Findings{Interfaces: []surface.Interface{{
+			ID: "web.dashboard", Access: &surface.Access{Authentication: "required"},
+		}}},
+		Features: []features.Node{{
+			ID: "dashboard.view", Type: "action", InterfaceIDs: []string{"web.dashboard"},
+		}},
+	}
+	coverage := FeatureCoverage(application, []InterfaceObservation{
+		{InterfaceID: "web.dashboard", State: "unauthenticated", Status: StatusAuthRequired},
+		{InterfaceID: "web.dashboard", State: "authenticated", Status: StatusVerified},
+	})
+	if len(coverage) != 1 || coverage[0].Status != StatusVerified {
+		t.Fatalf("expected auth wall to preserve authenticated verification: %#v", coverage)
+	}
+}
+
+func TestFeatureCoverageAcceptsPublicUnauthenticatedVerification(t *testing.T) {
+	application := &model.Application{
+		Surface: surface.Findings{Interfaces: []surface.Interface{{
+			ID: "web.login", Access: &surface.Access{Authentication: "not_required"},
+		}}},
+		Features: []features.Node{{
+			ID: "session.login", Type: "action", InterfaceIDs: []string{"web.login"},
+		}},
+	}
+	coverage := FeatureCoverage(application, []InterfaceObservation{{
+		InterfaceID: "web.login", State: "unauthenticated", Status: StatusVerified,
+	}})
+	if len(coverage) != 1 || coverage[0].Status != StatusVerified {
+		t.Fatalf("public unauthenticated verification was not sufficient: %#v", coverage)
+	}
+}
+
+func TestValidateRuntimeScopesInterfaceUniquenessByState(t *testing.T) {
+	application := runtimeApplicationFixture()
+	runtime := &Runtime{
+		SchemaVersion: SchemaVersion, SourceRunID: application.Metadata.RunID,
+		Status:                   RunStatusCompleted,
+		SourceGitCommit:          application.Metadata.Source.GitCommit,
+		ApplicationSchemaVersion: application.SchemaVersion,
+		Application:              ApplicationObservation{Status: StatusVerified, EvidenceIDs: []string{"ev"}},
+		Authentication:           AuthenticationObservation{Status: StatusVerified, EvidenceIDs: []string{"ev"}},
+		Interfaces: []InterfaceObservation{
+			{InterfaceID: "web.admin", State: "unauthenticated", Status: StatusAuthRequired, EvidenceIDs: []string{"ev"}},
+			{InterfaceID: "web.admin", State: "authenticated", Status: StatusVerified, EvidenceIDs: []string{"ev"}},
+		},
+	}
+	if err := ValidateRuntime(application, runtime, testRuntimeEvidence{"ev": true}); err != nil {
+		t.Fatalf("same interface in distinct states was rejected: %v", err)
+	}
+	runtime.Interfaces = append(runtime.Interfaces, InterfaceObservation{
+		InterfaceID: "web.admin", State: "authenticated", Status: StatusVerified,
+		EvidenceIDs: []string{"ev"},
+	})
+	err := ValidateRuntime(application, runtime, testRuntimeEvidence{"ev": true})
+	if err == nil || !strings.Contains(err.Error(), "duplicates interface_id") {
+		t.Fatalf("duplicate interface/state observation was not rejected: %v", err)
+	}
+}

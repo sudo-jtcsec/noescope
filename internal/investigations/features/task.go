@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -373,6 +374,21 @@ func validateNode(
 			)
 		}
 		if _, ok := references.interfaceIDs[interfaceID]; !ok {
+			caseMatches := make([]string, 0, 1)
+			for canonicalID := range references.interfaceIDs {
+				if strings.EqualFold(canonicalID, interfaceID) {
+					caseMatches = append(caseMatches, canonicalID)
+				}
+			}
+			sort.Strings(caseMatches)
+			if len(caseMatches) == 1 {
+				return fmt.Errorf(
+					"%s references unknown interface %q; canonical interface IDs are case-sensitive, use %q",
+					label,
+					interfaceID,
+					caseMatches[0],
+				)
+			}
 			return fmt.Errorf(
 				"%s references unknown interface %q",
 				label,

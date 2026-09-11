@@ -123,6 +123,18 @@ func TestVerifyReachabilityLoginReadOnlyInterfacesRedirectAndBinding(t *testing.
 	if strings.Contains(logs.String(), "alice") || strings.Contains(logs.String(), "super-secret") {
 		t.Fatalf("runtime logs contain credentials: %s", logs.String())
 	}
+	summary := Summarize(session.Runtime)
+	if summary.SelectedInterfaces != 3 || summary.Observations != 4 {
+		t.Fatalf("state observations changed unique selection accounting: %#v", summary)
+	}
+	for _, want := range []string{
+		"[runtime] interfaces:", "selected=3", "observations=4",
+		"verified=3", "auth_required=1", "contradicted=0",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("runtime telemetry missing %q: %s", want, logs.String())
+		}
+	}
 
 	jsonPath, markdownPath, err := session.Write()
 	if err != nil {
@@ -136,6 +148,103 @@ func TestVerifyReachabilityLoginReadOnlyInterfacesRedirectAndBinding(t *testing.
 		if strings.Contains(string(raw), "alice") || strings.Contains(string(raw), "super-secret") {
 			t.Fatalf("runtime artifact %s contains credentials", path)
 		}
+	}
+}
+
+func TestInterfaceExpectationMatrixUsesKnownLoginSurface(t *testing.T) {
+	public := &surface.Access{Authentication: "not_required"}
+	required := &surface.Access{Authentication: "required"}
+	loginURLs := []string{"https://app.example/login"}
+	tests := []struct {
+		name      string
+		item      surface.Interface
+		requested string
+		page      browser.Page
+		want      Status
+	}{
+		{
+			name:      "public login route is the requested interface",
+			item:      surface.Interface{ID: "session.entry", Type: "web_page", Access: public},
+			requested: "https://app.example/login",
+			page:      loginPage("https://app.example/login"),
+			want:      StatusVerified,
+		},
+		{
+			name:      "protected route redirected to login",
+			item:      surface.Interface{ID: "dashboard", Type: "web_page", Access: required},
+			requested: "https://app.example/dashboard",
+			page:      loginPage("https://app.example/login"),
+			want:      StatusAuthRequired,
+		},
+		{
+			name:      "public route redirected to login",
+			item:      surface.Interface{ID: "public.board", Type: "web_page", Access: public},
+			requested: "https://app.example/public",
+			page:      loginPage("https://app.example/login"),
+			want:      StatusContradicted,
+		},
+		{
+			name:      "protected route anonymously reachable",
+			item:      surface.Interface{ID: "dashboard", Type: "web_page", Access: required},
+			requested: "https://app.example/dashboard",
+			page: browser.Page{
+				RequestedURL: "https://app.example/dashboard",
+				FinalURL:     "https://app.example/dashboard", HTTPStatus: 200, Ready: true,
+			},
+			want: StatusContradicted,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, _ := classifyInterfacePage(
+				test.item, "unauthenticated", test.requested, test.page, loginURLs,
+			)
+			if status != test.want {
+				t.Fatalf("status = %q, want %q", status, test.want)
+			}
+		})
+	}
+}
+
+func TestUnknownAccessAuthWallGetsAuthenticatedObservationWithinUniqueLimit(t *testing.T) {
+	application := runtimeApplicationFixture()
+	application.Surface.Interfaces = []surface.Interface{{
+		ID: "user.list", Type: "web_page",
+		Locator: surface.InterfaceLocator{Method: "GET", Path: "/admin"},
+		Access:  &surface.Access{Authentication: "unknown"},
+	}}
+	application.Features = nil
+	session, err := NewSession(t.TempDir(), application, "https://app.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeBrowser{loginWorks: true}
+	redactor := NewRedactor("alice", "super-secret")
+	var logs strings.Builder
+	if err := Verify(context.Background(), VerifyOptions{
+		Application: application, Runtime: session.Runtime, RuntimeRoot: session.Root,
+		Browser: fake, Evidence: NewEvidenceStore(session.Root, redactor), Redactor: redactor,
+		IdentityID: "admin", Credentials: &browser.Credentials{Username: "alice", Password: "super-secret"},
+		MaxInterfaces: 1,
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(&logs, format+"\n", args...)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	byState := map[string]InterfaceObservation{}
+	for _, observation := range session.Runtime.Interfaces {
+		byState[observation.State] = observation
+	}
+	if byState["unauthenticated"].Status != StatusAuthRequired ||
+		byState["authenticated"].Status != StatusVerified {
+		t.Fatalf("unknown access auth wall was not retried after login: %#v", byState)
+	}
+	summary := Summarize(session.Runtime)
+	if summary.SelectedInterfaces != 1 || summary.Observations != 2 ||
+		!strings.Contains(logs.String(), "selected=1") ||
+		!strings.Contains(logs.String(), "observations=2") {
+		t.Fatalf("unique limit or telemetry counted states as interfaces: %#v\n%s", summary, logs.String())
 	}
 }
 

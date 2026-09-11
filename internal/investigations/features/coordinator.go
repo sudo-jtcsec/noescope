@@ -188,19 +188,27 @@ func moduleDiscoveryTask(
 	task.ID = "features.modules"
 	task.Name = "Feature Module Discovery"
 	task.Objective = `Identify only the top-level user/client-recognizable functional modules in the validated application model. Return module nodes with children set to an empty array. Do not build features or actions yet.`
-	task.Instructions = `Assign each module the canonical concrete interface IDs that belong to its functional area so a later bounded expansion can use them. Prefer concrete operations and views over roots. Every module must have at least one canonical interface ID. Use a concise semantic domain ID such as projects or administration; never prefix IDs with module., feature., or action. Do not invent interface, entity, role, permission, or evidence IDs. Keep modules broad, distinct, and product-meaningful. Repository tools are for targeted clarification only.`
+	task.Instructions = `Assign each module the canonical concrete interface IDs that belong to its functional area so a later bounded expansion can use them. The compact interface table names its columns in surface.interface_fields: its first column is the canonical ID. Copy every assigned interface ID byte-for-byte from that first column; IDs are case-sensitive, and a locator or method name is not an interface ID. Entity, role, and permission IDs must likewise be copied byte-for-byte from their respective context arrays; omit a reference when that concept has no canonical ID. Prefer concrete operations and views over roots. Every module must have at least one canonical interface ID. Use a concise semantic domain ID such as projects or administration; never prefix IDs with module., feature., or action. Do not invent interface, entity, role, permission, or evidence IDs. Keep modules broad, distinct, and product-meaningful. Repository tools are for targeted clarification only.`
 	task.Context = append(json.RawMessage(nil), context...)
 	candidateSet := stringSet(candidateIDs)
 	task.ValidateResult = func(
 		result *investigation.Result,
 		evidence investigation.EvidenceLookup,
 	) error {
-		if err := validateResultWithReferences(result, evidence, references); err != nil {
-			return err
-		}
 		findings, err := decodeFindings(result.Findings)
 		if err != nil {
 			return investigation.NewSubmissionFormatError(err)
+		}
+		normalizeCanonicalInterfaceReferences(findings.Features, references.interfaceIDs)
+		result.Findings, err = json.Marshal(findings)
+		if err != nil {
+			return err
+		}
+		if err := validateModuleCanonicalReferences(findings.Features, references); err != nil {
+			return err
+		}
+		if err := validateResultWithReferences(result, evidence, references); err != nil {
+			return err
 		}
 		if len(candidateIDs) > 0 && len(findings.Features) == 0 {
 			return fmt.Errorf("module discovery produced no modules for %d concrete interfaces", len(candidateIDs))
@@ -238,6 +246,58 @@ func moduleDiscoveryTask(
 	return task
 }
 
+func validateModuleCanonicalReferences(
+	modules []Node,
+	references priorReferences,
+) error {
+	unknownEntities := make([]string, 0)
+	unknownInterfaces := make([]string, 0)
+	unknownRoles := make([]string, 0)
+	unknownPermissions := make([]string, 0)
+	for _, module := range modules {
+		for _, id := range module.EntityIDs {
+			if _, ok := references.entityIDs[id]; !ok {
+				unknownEntities = append(unknownEntities, id)
+			}
+		}
+		for _, id := range module.InterfaceIDs {
+			if _, ok := references.interfaceIDs[id]; !ok {
+				unknownInterfaces = append(unknownInterfaces, id)
+			}
+		}
+		for _, id := range module.Access.RoleIDs {
+			if _, ok := references.roleIDs[id]; !ok {
+				unknownRoles = append(unknownRoles, id)
+			}
+		}
+		for _, id := range module.Access.PermissionIDs {
+			if _, ok := references.permissionIDs[id]; !ok {
+				unknownPermissions = append(unknownPermissions, id)
+			}
+		}
+	}
+	parts := make([]string, 0, 4)
+	if ids := sortedUnique(unknownEntities); len(ids) > 0 {
+		parts = append(parts, fmt.Sprintf("unknown entities %q", ids))
+	}
+	if ids := sortedUnique(unknownInterfaces); len(ids) > 0 {
+		parts = append(parts, fmt.Sprintf("unknown interfaces %q", ids))
+	}
+	if ids := sortedUnique(unknownRoles); len(ids) > 0 {
+		parts = append(parts, fmt.Sprintf("unknown roles %q", ids))
+	}
+	if ids := sortedUnique(unknownPermissions); len(ids) > 0 {
+		parts = append(parts, fmt.Sprintf("unknown permissions %q", ids))
+	}
+	if len(parts) > 0 {
+		return fmt.Errorf(
+			"module discovery must copy canonical IDs byte-for-byte: %s",
+			strings.Join(parts, "; "),
+		)
+	}
+	return nil
+}
+
 func moduleExpansionTask(
 	module Node,
 	context json.RawMessage,
@@ -270,6 +330,11 @@ func moduleExpansionTask(
 		if err != nil {
 			return investigation.NewSubmissionFormatError(err)
 		}
+		normalizeCanonicalInterfaceReferences(findings.Features, references.interfaceIDs)
+		result.Findings, err = json.Marshal(findings)
+		if err != nil {
+			return err
+		}
 		seenIDs := map[string]struct{}{module.ID: {}}
 		for i := range findings.Features {
 			if err := validateNode(
@@ -301,6 +366,36 @@ func moduleExpansionTask(
 		return err
 	}
 	return task
+}
+
+func normalizeCanonicalInterfaceReferences(
+	nodes []Node,
+	canonicalIDs map[string]struct{},
+) {
+	byFold := make(map[string][]string, len(canonicalIDs))
+	for id := range canonicalIDs {
+		key := strings.ToLower(id)
+		byFold[key] = append(byFold[key], id)
+	}
+	for key := range byFold {
+		sort.Strings(byFold[key])
+	}
+	var normalize func([]Node)
+	normalize = func(items []Node) {
+		for i := range items {
+			for j, id := range items[i].InterfaceIDs {
+				if _, exact := canonicalIDs[id]; exact {
+					continue
+				}
+				matches := byFold[strings.ToLower(id)]
+				if len(matches) == 1 {
+					items[i].InterfaceIDs[j] = matches[0]
+				}
+			}
+			normalize(items[i].Children)
+		}
+	}
+	normalize(nodes)
 }
 
 func validateExpansionChildren(nodes []Node, assigned map[string]struct{}) error {

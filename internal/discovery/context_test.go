@@ -51,18 +51,8 @@ func TestFeatureContextContainsSemanticGroupingEssentials(t *testing.T) {
 		context.Entities[0].EvidenceIDs[0] != "ev_entity" {
 		t.Fatalf("entity essentials missing: %#v", context.Entities)
 	}
-	if context.Surface.Interfaces[0].ID != "project.create" ||
-		context.Surface.Interfaces[0].Evidence == "" {
+	if context.Surface.Interfaces[0].ID != "project.create" {
 		t.Fatalf("surface essentials missing: %#v", context.Surface)
-	}
-	var projectedEvidenceID string
-	for _, profile := range context.Surface.EvidenceProfiles {
-		if profile.ID == context.Surface.Interfaces[0].Evidence {
-			projectedEvidenceID = profile.EvidenceID
-		}
-	}
-	if projectedEvidenceID != "ev_surface" {
-		t.Fatalf("surface evidence profile missing: %#v", context.Surface.EvidenceProfiles)
 	}
 	if context.Surface.Integrations[0].ID != "integration.smtp" {
 		t.Fatalf("minimal integrations missing: %#v", context.Surface.Integrations)
@@ -107,8 +97,8 @@ func TestFeatureContextExcludesSummariesChatAndVerboseCanonicalData(t *testing.T
 			t.Fatalf("feature context contains excluded data %q", excluded)
 		}
 	}
-	if strings.Count(contextText, "ev_surface") != 1 {
-		t.Fatalf("expected one bounded surface evidence ID: %s", contextText)
+	if strings.Contains(contextText, "ev_surface") {
+		t.Fatalf("module inventory should defer per-interface evidence to module projections: %s", contextText)
 	}
 }
 
@@ -235,11 +225,12 @@ func TestFeatureContextRetainsConcreteInterfacesAheadOfRoots(t *testing.T) {
 	if len(context.Surface.Interfaces) != len(surfaceFindings.Interfaces) {
 		t.Fatalf("projection dropped concrete interfaces: %d != %d", len(context.Surface.Interfaces), len(surfaceFindings.Interfaces))
 	}
-	if context.Surface.Interfaces[0].Root || context.Surface.Interfaces[0].ID == "api.transport" {
+	if context.Surface.Interfaces[0].ID == "api.transport" {
 		t.Fatalf("root crowded out concrete interfaces: %#v", context.Surface.Interfaces[:2])
 	}
 	last := context.Surface.Interfaces[len(context.Surface.Interfaces)-1]
-	if last.ID != "api.transport" || !last.Root {
+	if last.ID != "api.transport" ||
+		!reflect.DeepEqual(context.Surface.RootInterfaceIDs, []string{"api.transport"}) {
 		t.Fatalf("root interface was not retained and deprioritized: %#v", last)
 	}
 }

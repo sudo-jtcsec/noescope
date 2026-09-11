@@ -21,7 +21,7 @@ func TestSplitCategoryTaskSpecIsDeterministicHalfSplit(t *testing.T) {
 		false,
 		0,
 	)
-	left, right := splitCategoryTaskSpec(spec)
+	left, right := splitCategoryTaskSpec(CategoryAPI, spec)
 	if left.suffix != "group_3.1" || right.suffix != "group_3.2" ||
 		!reflect.DeepEqual(left.candidates, []string{"a", "b", "c"}) ||
 		!reflect.DeepEqual(right.candidates, []string{"d", "e"}) {
