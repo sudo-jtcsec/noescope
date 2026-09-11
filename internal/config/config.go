@@ -6,6 +6,7 @@ type Config struct {
 	Application ApplicationConfig `yaml:"application"`
 	Identities  []IdentityConfig  `yaml:"identities"`
 	Runtime     RuntimeConfig     `yaml:"runtime"`
+	Testing     TestingConfig     `yaml:"testing"`
 	AI          AIConfig          `yaml:"ai"`
 	Discovery   DiscoveryConfig   `yaml:"discovery"`
 }
@@ -41,6 +42,18 @@ type RuntimeBrowserConfig struct {
 	Headless        bool   `yaml:"headless"`
 	IgnoreTLSErrors bool   `yaml:"ignore_tls_errors"`
 	Executable      string `yaml:"executable"`
+}
+
+type TestingConfig struct {
+	Enabled      bool                  `yaml:"enabled"`
+	Identity     string                `yaml:"identity"`
+	Mutations    TestingMutationConfig `yaml:"mutations"`
+	Cleanup      string                `yaml:"cleanup"`
+	MaxCoreTests int                   `yaml:"max_core_tests"`
+}
+
+type TestingMutationConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type AIConfig struct {

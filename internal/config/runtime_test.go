@@ -107,3 +107,37 @@ func TestRuntimeDefaultsToApplicationURLAndHeadless(t *testing.T) {
 		t.Fatalf("unexpected runtime defaults: %#v", cfg.Runtime)
 	}
 }
+
+func TestTestingConfigParsingAndSafeMutationDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noescope.yml")
+	if err := os.WriteFile(path, []byte(`testing:
+  enabled: true
+  identity: admin
+  cleanup: always
+  max_core_tests: 12
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Testing.Enabled || cfg.Testing.Identity != "admin" || cfg.Testing.Cleanup != "always" ||
+		cfg.Testing.MaxCoreTests != 12 || cfg.Testing.Mutations.Enabled {
+		t.Fatalf("unexpected testing config: %#v", cfg.Testing)
+	}
+}
+
+func TestTestingDefaultsAreNonMutatingAndBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noescope.yml")
+	if err := os.WriteFile(path, []byte("project:\n  name: fixture\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Testing.Enabled || cfg.Testing.Mutations.Enabled || cfg.Testing.Cleanup != "always" || cfg.Testing.MaxCoreTests != 20 {
+		t.Fatalf("unsafe testing defaults: %#v", cfg.Testing)
+	}
+}

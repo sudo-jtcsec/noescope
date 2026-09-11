@@ -30,6 +30,14 @@ runtime:
     executable: ""
   identity: ""
 
+testing:
+  enabled: false
+  identity: ""
+  mutations:
+    enabled: false
+  cleanup: always
+  max_core_tests: 20
+
 ai:
   base_url: http://localhost:8000/v1
   model: ""

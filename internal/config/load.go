@@ -33,6 +33,12 @@ func Load(path string) (*Config, error) {
 	if cfg.Runtime.BaseURL == "" {
 		cfg.Runtime.BaseURL = cfg.Application.URL
 	}
+	if cfg.Testing.Cleanup == "" {
+		cfg.Testing.Cleanup = "always"
+	}
+	if cfg.Testing.MaxCoreTests == 0 {
+		cfg.Testing.MaxCoreTests = 20
+	}
 
 	return &cfg, nil
 }
@@ -49,6 +55,8 @@ func expandConfigEnvironment(cfg *Config) {
 	cfg.Application.URL = os.ExpandEnv(cfg.Application.URL)
 	cfg.Runtime.BaseURL = os.ExpandEnv(cfg.Runtime.BaseURL)
 	cfg.Runtime.Identity = os.ExpandEnv(cfg.Runtime.Identity)
+	cfg.Testing.Identity = os.ExpandEnv(cfg.Testing.Identity)
+	cfg.Testing.Cleanup = os.ExpandEnv(cfg.Testing.Cleanup)
 	for index := range cfg.Identities {
 		cfg.Identities[index].ID = os.ExpandEnv(cfg.Identities[index].ID)
 		cfg.Identities[index].ExpectedRole = os.ExpandEnv(cfg.Identities[index].ExpectedRole)

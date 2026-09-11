@@ -34,6 +34,7 @@ to build an evidence-backed model of application functionality.`,
 	rootCmd.AddCommand(initCommand())
 	rootCmd.AddCommand(discoverCommand())
 	rootCmd.AddCommand(verifyCommand())
+	rootCmd.AddCommand(testCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
