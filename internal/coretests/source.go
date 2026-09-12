@@ -11,12 +11,60 @@ import (
 
 	"github.com/sudo-jtcsec/noescope/internal/model"
 	"github.com/sudo-jtcsec/noescope/internal/runtimeverify"
+	"github.com/sudo-jtcsec/noescope/internal/testsmodel"
 )
 
 type LoadedRuntime struct {
 	Root    string
 	Runtime *runtimeverify.Runtime
 	Path    string
+}
+
+func LoadBestVerifiedPack(
+	sourceRunRoot string,
+	application *model.Application,
+	runtimeID string,
+) (*testsmodel.TestPack, error) {
+	root := filepath.Join(sourceRunRoot, "tests")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list Core Test packs: %w", err)
+	}
+	type candidate struct{ pack testsmodel.TestPack }
+	candidates := []candidate{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(root, entry.Name(), "core-tests.json"))
+		if err != nil {
+			continue
+		}
+		var pack testsmodel.TestPack
+		if json.Unmarshal(raw, &pack) != nil || pack.SourceRunID != application.Metadata.RunID ||
+			pack.GitCommit != application.Metadata.Source.GitCommit || pack.RuntimeRunID != runtimeID ||
+			testsmodel.ValidatePack(&pack, application) != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{pack: pack})
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if len(candidates[i].pack.Tests) != len(candidates[j].pack.Tests) {
+			return len(candidates[i].pack.Tests) > len(candidates[j].pack.Tests)
+		}
+		if !candidates[i].pack.GeneratedAt.Equal(candidates[j].pack.GeneratedAt) {
+			return candidates[i].pack.GeneratedAt.After(candidates[j].pack.GeneratedAt)
+		}
+		return candidates[i].pack.TestPackID > candidates[j].pack.TestPackID
+	})
+	pack := candidates[0].pack
+	return &pack, nil
 }
 
 func LoadCompletedRuntime(sourceRunRoot, runtimeID string, application *model.Application) (*LoadedRuntime, error) {

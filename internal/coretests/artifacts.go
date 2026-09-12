@@ -68,17 +68,33 @@ func (s *Session) Complete(results []testsmodel.CandidateResult) {
 	for index := range s.Execution.Results {
 		result := &s.Execution.Results[index]
 		result.Reason = s.redactor.String(result.Reason)
+		result.WorkflowFailure = s.redactor.String(result.WorkflowFailure)
+		result.CleanupFailure = s.redactor.String(result.CleanupFailure)
 		for key, value := range result.Values {
 			result.Values[key] = s.redactor.String(value)
+		}
+		for ownedIndex := range result.OwnedObjects {
+			for key, value := range result.OwnedObjects[ownedIndex].GeneratedFields {
+				result.OwnedObjects[ownedIndex].GeneratedFields[key] = s.redactor.String(value)
+			}
 		}
 	}
 	s.Execution.CompletedAt = time.Now().UTC()
 	s.Execution.Summary = summarizeResults(results)
+	verified := make(map[string]int, len(s.Pack.Tests))
+	for index := range s.Pack.Tests {
+		verified[s.Pack.Tests[index].ID] = index
+	}
 	for _, result := range s.Execution.Results {
 		if result.Status == testsmodel.StatusPassed {
 			test := result.Candidate
 			testsmodel.NormalizeTest(&test)
-			s.Pack.Tests = append(s.Pack.Tests, test)
+			if index, exists := verified[test.ID]; exists {
+				s.Pack.Tests[index] = test
+			} else {
+				verified[test.ID] = len(s.Pack.Tests)
+				s.Pack.Tests = append(s.Pack.Tests, test)
+			}
 		}
 	}
 	sort.Slice(s.Pack.Tests, func(i, j int) bool { return s.Pack.Tests[i].ID < s.Pack.Tests[j].ID })
@@ -96,6 +112,13 @@ func (s *Session) Complete(results []testsmodel.CandidateResult) {
 			TestPackID: s.Pack.TestPackID, VerifiedTestIDs: ids,
 		}
 	}
+}
+
+func (s *Session) SeedVerifiedTests(pack *testsmodel.TestPack) {
+	if pack == nil {
+		return
+	}
+	s.Pack.Tests = append([]testsmodel.TestCase(nil), pack.Tests...)
 }
 
 func (s *Session) Write(application *model.Application) (ArtifactPaths, error) {

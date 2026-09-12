@@ -113,6 +113,11 @@ func ValidateTest(test TestCase, application *model.Application) error {
 		} else if assertion.Match != "" {
 			return fmt.Errorf("test %q assertion[%d] uses match mode with unsupported assertion %q", test.ID, index, assertion.Type)
 		}
+		if assertion.InterfaceID != "" {
+			if _, ok := interfaces[assertion.InterfaceID]; !ok {
+				return fmt.Errorf("test %q assertion[%d] references unknown interface ID %q", test.ID, index, assertion.InterfaceID)
+			}
+		}
 	}
 	for index, cleanup := range test.Cleanup {
 		if _, ok := cleanupTypes[cleanup.Type]; !ok {
@@ -120,6 +125,11 @@ func ValidateTest(test TestCase, application *model.Application) error {
 		}
 		if cleanup.Type == "delete_created_entity" && cleanup.OwnedReference == "" {
 			return fmt.Errorf("test %q cleanup[%d] lacks an owned object reference", test.ID, index)
+		}
+		if cleanup.InterfaceID != "" {
+			if _, ok := interfaces[cleanup.InterfaceID]; !ok {
+				return fmt.Errorf("test %q cleanup[%d] references unknown interface ID %q", test.ID, index, cleanup.InterfaceID)
+			}
 		}
 	}
 	if test.Safety.Mutating && (!test.Safety.RequiresOwnedData || !test.Safety.CleanupRequired || len(test.Cleanup) == 0) {

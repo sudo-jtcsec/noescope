@@ -99,11 +99,26 @@ type Execution struct {
 }
 
 type CandidateResult struct {
-	Candidate   TestCase          `json:"candidate"`
-	Status      string            `json:"status"`
-	Reason      string            `json:"reason,omitempty"`
-	EvidenceIDs []string          `json:"evidence_ids"`
-	Values      map[string]string `json:"values,omitempty"`
+	Candidate       TestCase          `json:"candidate"`
+	Status          string            `json:"status"`
+	Reason          string            `json:"reason,omitempty"`
+	WorkflowFailure string            `json:"workflow_failure,omitempty"`
+	CleanupFailure  string            `json:"cleanup_failure,omitempty"`
+	EvidenceIDs     []string          `json:"evidence_ids"`
+	Values          map[string]string `json:"values,omitempty"`
+	OwnedObjects    []OwnedObject     `json:"owned_objects,omitempty"`
+}
+
+type OwnedObject struct {
+	OwnershipID         string            `json:"ownership_id"`
+	ExecutionID         string            `json:"execution_id"`
+	EntityID            string            `json:"entity_id"`
+	CreatedByTestID     string            `json:"created_by_test_id"`
+	RuntimeIdentifier   string            `json:"runtime_identifier"`
+	GeneratedFields     map[string]string `json:"generated_fields"`
+	CreationEvidenceIDs []string          `json:"creation_evidence_ids"`
+	CleanupStatus       string            `json:"cleanup_status,omitempty"`
+	CleanupEvidenceIDs  []string          `json:"cleanup_evidence_ids,omitempty"`
 }
 
 type ExecutionSummary struct {

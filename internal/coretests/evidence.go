@@ -48,6 +48,10 @@ func (s *EvidenceStore) Add(record EvidenceRecord) (EvidenceRecord, error) {
 	for key, value := range record.Attributes {
 		if sensitiveEvidenceAttribute(key) {
 			record.Attributes[key] = "[REDACTED]"
+		} else if strings.Contains(strings.ToLower(key), "url") ||
+			strings.Contains(strings.ToLower(key), "action") ||
+			strings.Contains(strings.ToLower(key), "location") {
+			record.Attributes[key] = s.redactor.URL(value)
 		} else {
 			record.Attributes[key] = s.redactor.String(value)
 		}

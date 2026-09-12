@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -22,25 +23,28 @@ func testCommand() *cobra.Command {
 		Short: "Generate and execute application test packs",
 	}
 	command.AddCommand(coreTestCommand())
+	command.AddCommand(exportTestCommand())
 	return command
 }
 
 func coreTestCommand() *cobra.Command {
 	var sourceRunID string
 	var runtimeRunID string
+	var testID string
 	command := &cobra.Command{
 		Use:   "core",
 		Short: "Generate, execute, and baseline a Core Test Pack",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreTests(cmd.Context(), sourceRunID, runtimeRunID)
+			return runCoreTests(cmd.Context(), sourceRunID, runtimeRunID, testID)
 		},
 	}
 	command.Flags().StringVar(&sourceRunID, "run", "", "source discovery run ID (defaults to latest compatible complete run)")
 	command.Flags().StringVar(&runtimeRunID, "runtime", "", "runtime verification run ID (defaults to latest compatible completed run)")
+	command.Flags().StringVar(&testID, "test", "", "execute only the selected canonical Core Test candidate")
 	return command
 }
 
-func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID string) error {
+func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID, testID string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -114,6 +118,14 @@ func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID string) error {
 	if err != nil {
 		return fmt.Errorf("select Core Test candidates: %w", err)
 	}
+	var workflowPlan *coretests.OwnedLifecyclePlan
+	if testID != "" {
+		workflowPlan, _ = coretests.PlanOwnedLifecycle(source.Application)
+		candidates, err = coretests.FilterTestCandidates(candidates, workflowPlan, testID)
+		if err != nil {
+			return err
+		}
+	}
 	if len(candidates) == 0 {
 		return fmt.Errorf("no grounded Core Test candidates were selected")
 	}
@@ -123,6 +135,13 @@ func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID string) error {
 	if err != nil {
 		return err
 	}
+	previousPack, err := coretests.LoadBestVerifiedPack(
+		source.Run.Root, source.Application, loadedRuntime.Runtime.RuntimeID,
+	)
+	if err != nil {
+		return err
+	}
+	session.SeedVerifiedTests(previousPack)
 	evidenceStore := coretests.NewEvidenceStore(session.Root, redactor)
 
 	fmt.Printf("Source run:  %s\n", source.Run.ID)
@@ -140,9 +159,16 @@ func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID string) error {
 		fmt.Printf("%2d. score=%d [%s] %s (%s)\n", index+1,
 			candidate.Safety.SelectionScore, classification, candidate.Name, candidate.ID)
 	}
+	if workflowPlan != nil && len(candidates) == 1 && candidates[0].ID == workflowPlan.Test.ID {
+		fmt.Printf("\nOwned lifecycle plan:\n")
+		fmt.Printf("  parent: %s (%s)\n", workflowPlan.ParentEntity.Name, workflowPlan.ParentEntity.ID)
+		fmt.Printf("  child: %s (%s)\n", workflowPlan.ChildEntity.Name, workflowPlan.ChildEntity.ID)
+		fmt.Printf("  interfaces: %s\n", strings.Join(workflowPlan.Test.InterfaceIDs, ", "))
+		fmt.Printf("  features: %s\n", strings.Join(workflowPlan.Test.FeatureIDs, ", "))
+	}
 	fmt.Println()
 
-	results := coretests.ExecuteCandidates(ctx, candidates, coretests.ExecutorOptions{
+	executorOptions := coretests.ExecutorOptions{
 		Application: source.Application, Runtime: loadedRuntime.Runtime,
 		Credentials: credentials, MutationsEnabled: cfg.Testing.Mutations.Enabled,
 		AuthenticationUnavailableReason: authenticationUnavailableReason,
@@ -153,7 +179,17 @@ func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID string) error {
 				ExecutablePath: cfg.Runtime.Browser.Executable,
 			})
 		},
-	})
+	}
+	var results []testsmodel.CandidateResult
+	if workflowPlan != nil && len(candidates) == 1 && candidates[0].ID == workflowPlan.Test.ID {
+		results = []testsmodel.CandidateResult{coretests.ExecuteOwnedLifecycle(
+			ctx, workflowPlan, coretests.WorkflowExecutorOptions{
+				ExecutorOptions: executorOptions, ExecutionID: session.Pack.TestPackID,
+			},
+		)}
+	} else {
+		results = coretests.ExecuteCandidates(ctx, candidates, executorOptions)
+	}
 	session.Complete(results)
 	paths, err := session.Write(source.Application)
 	if err != nil {

@@ -2,6 +2,7 @@ package coretests
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/sudo-jtcsec/noescope/internal/id"
@@ -9,12 +10,22 @@ import (
 )
 
 type ExecutionState struct {
-	values map[string]string
-	owned  map[string]string
+	executionID string
+	testID      string
+	values      map[string]string
+	owned       map[string]testsmodel.OwnedObject
 }
 
 func NewExecutionState() *ExecutionState {
-	return &ExecutionState{values: map[string]string{}, owned: map[string]string{}}
+	return NewExecutionStateFor("", "")
+
+}
+
+func NewExecutionStateFor(executionID, testID string) *ExecutionState {
+	return &ExecutionState{
+		executionID: executionID, testID: testID,
+		values: map[string]string{}, owned: map[string]testsmodel.OwnedObject{},
+	}
 }
 
 func (s *ExecutionState) ResolveValue(reference string, value testsmodel.ValueReference) (string, error) {
@@ -41,24 +52,99 @@ func (s *ExecutionState) ResolveValue(reference string, value testsmodel.ValueRe
 }
 
 func (s *ExecutionState) TrackOwned(reference, objectID string) error {
+	return s.EstablishOwned(reference, "", objectID, nil, nil)
+}
+
+func (s *ExecutionState) EstablishOwned(
+	reference, entityID, objectID string,
+	generatedFields map[string]string,
+	evidenceIDs []string,
+) error {
 	if reference == "" || objectID == "" {
 		return fmt.Errorf("owned object requires a reference and runtime object ID")
 	}
-	s.owned[reference] = objectID
+	fields := make(map[string]string, len(generatedFields))
+	for key, value := range generatedFields {
+		fields[key] = value
+	}
+	s.owned[reference] = testsmodel.OwnedObject{
+		OwnershipID: id.New("ownership"), ExecutionID: s.executionID,
+		EntityID: entityID, CreatedByTestID: s.testID,
+		RuntimeIdentifier: objectID, GeneratedFields: fields,
+		CreationEvidenceIDs: append([]string(nil), evidenceIDs...),
+	}
 	return nil
 }
 
 func (s *ExecutionState) RequireOwned(reference string) (string, error) {
-	objectID, ok := s.owned[reference]
-	if !ok || objectID == "" {
+	object, ok := s.owned[reference]
+	if !ok || object.RuntimeIdentifier == "" {
 		return "", fmt.Errorf("refusing cleanup: object %q is not owned by this test execution", reference)
 	}
-	return objectID, nil
+	if object.ExecutionID != s.executionID || object.CreatedByTestID != s.testID {
+		return "", fmt.Errorf("refusing cleanup: object %q belongs to a different test execution", reference)
+	}
+	return object.RuntimeIdentifier, nil
+}
+
+func (s *ExecutionState) Owns(reference string) bool {
+	object, ok := s.owned[reference]
+	return ok && object.RuntimeIdentifier != "" &&
+		object.ExecutionID == s.executionID && object.CreatedByTestID == s.testID
+}
+
+func (s *ExecutionState) MarkCleanup(reference, status string, evidenceIDs []string) error {
+	if _, err := s.RequireOwned(reference); err != nil {
+		return err
+	}
+	object := s.owned[reference]
+	object.CleanupStatus = status
+	object.CleanupEvidenceIDs = append([]string(nil), evidenceIDs...)
+	s.owned[reference] = object
+	return nil
+}
+
+func (s *ExecutionState) UpdateOwnedFields(reference string, fields map[string]string) error {
+	if _, err := s.RequireOwned(reference); err != nil {
+		return err
+	}
+	object := s.owned[reference]
+	if object.GeneratedFields == nil {
+		object.GeneratedFields = map[string]string{}
+	}
+	for key, value := range fields {
+		object.GeneratedFields[key] = value
+	}
+	s.owned[reference] = object
+	return nil
+}
+
+func (s *ExecutionState) OwnedObjects() []testsmodel.OwnedObject {
+	result := make([]testsmodel.OwnedObject, 0, len(s.owned))
+	for _, object := range s.owned {
+		object.GeneratedFields = cloneStrings(object.GeneratedFields)
+		result = append(result, object)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].EntityID != result[j].EntityID {
+			return result[i].EntityID < result[j].EntityID
+		}
+		return result[i].RuntimeIdentifier < result[j].RuntimeIdentifier
+	})
+	return result
 }
 
 func (s *ExecutionState) Values() map[string]string {
 	result := make(map[string]string, len(s.values))
 	for key, value := range s.values {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneStrings(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
 		result[key] = value
 	}
 	return result

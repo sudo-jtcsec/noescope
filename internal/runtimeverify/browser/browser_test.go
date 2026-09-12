@@ -90,3 +90,31 @@ func TestLoginFormRegressionFixtureUsesStableSelectorsAndIgnoresOtherControls(t 
 		t.Fatalf("submission should touch two controls and one submit button, got %d actions", len(actions))
 	}
 }
+
+func TestMutationFormObservationRetainsOnlySafeMetadata(t *testing.T) {
+	forms := formsFromSnapshot([]formSnapshot{{
+		Selector: "#create", Action: "/project/save?csrf_token=SECRET", Method: "POST",
+		Controls: []controlSnapshot{
+			{Name: "csrf_token", Type: "hidden", Selector: `input[name="csrf_token"]`},
+			{Name: "name", ID: "form-name", Type: "text", Label: "Name", Selector: "#form-name"},
+			{Name: "remember", Type: "checkbox", Selector: `input[name="remember"]`},
+			{Name: "description", Type: "textarea", Label: "Description", Selector: "#description"},
+		},
+		Submit: &controlSnapshot{Type: "submit", Text: "Save", Selector: "#create button[type=submit]"},
+	}})
+	if len(forms) != 1 || len(forms[0].Controls) != 2 {
+		t.Fatalf("unsafe mutation controls were retained: %#v", forms)
+	}
+	if forms[0].Controls[0].Name != "name" || forms[0].Controls[1].Name != "description" {
+		t.Fatalf("safe semantic controls missing: %#v", forms[0].Controls)
+	}
+	raw, err := json.Marshal(forms[0].Controls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"SECRET", "csrf_token", "remember", `"value"`} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("unsafe form state persisted %q: %s", forbidden, raw)
+		}
+	}
+}

@@ -113,6 +113,51 @@ func (c *Chrome) SubmitLogin(
 	return page, err
 }
 
+func (c *Chrome) SubmitForm(_ context.Context, submission FormSubmission) (Page, error) {
+	c.reset(submission.PageURL)
+	actions := make([]chromedp.Action, 0, len(submission.Entries)*5+1)
+	for _, entry := range submission.Entries {
+		if entry.Selector == "" {
+			return Page{RequestedURL: submission.PageURL}, fmt.Errorf("submit form: empty control selector")
+		}
+		switch entry.Type {
+		case "select", "select-one", "select-multiple":
+			actions = append(actions, chromedp.SetValue(entry.Selector, entry.Value, chromedp.ByQuery))
+		default:
+			actions = append(actions, liveControlEntryActions(entry.Selector, entry.Value)...)
+		}
+	}
+	if submission.SubmitSelector == "" {
+		return Page{RequestedURL: submission.PageURL}, fmt.Errorf("submit form: no native submit control")
+	}
+	actions = append(actions, chromedp.Click(submission.SubmitSelector, chromedp.ByQuery))
+	if _, err := chromedp.RunResponse(c.targetCtx, actions...); err != nil {
+		return Page{RequestedURL: submission.PageURL}, fmt.Errorf("submit form: %w", err)
+	}
+	readyErr := chromedp.Run(c.targetCtx, chromedp.WaitReady("body", chromedp.ByQuery))
+	page, err := c.observe(c.targetCtx, submission.PageURL)
+	if readyErr != nil {
+		page.ObservationErrors = append(page.ObservationErrors, BrowserObservationError{Operation: "document ready", Err: readyErr})
+	}
+	return page, err
+}
+
+func (c *Chrome) Activate(_ context.Context, activation Activation) (Page, error) {
+	if activation.Selector == "" {
+		return Page{RequestedURL: activation.PageURL}, fmt.Errorf("activate control: empty selector")
+	}
+	c.reset(activation.PageURL)
+	if _, err := chromedp.RunResponse(c.targetCtx, chromedp.Click(activation.Selector, chromedp.ByQuery)); err != nil {
+		return Page{RequestedURL: activation.PageURL}, fmt.Errorf("activate control: %w", err)
+	}
+	readyErr := chromedp.Run(c.targetCtx, chromedp.WaitReady("body", chromedp.ByQuery))
+	page, err := c.observe(c.targetCtx, activation.PageURL)
+	if readyErr != nil {
+		page.ObservationErrors = append(page.ObservationErrors, BrowserObservationError{Operation: "document ready", Err: readyErr})
+	}
+	return page, err
+}
+
 type loginSubmissionPlan struct {
 	UsernameSelector string
 	PasswordSelector string
@@ -284,6 +329,7 @@ type pageSnapshot struct {
 }
 
 type formSnapshot struct {
+	Selector string            `json:"selector"`
 	Action   string            `json:"action"`
 	Method   string            `json:"method"`
 	Controls []controlSnapshot `json:"controls"`
@@ -291,23 +337,32 @@ type formSnapshot struct {
 }
 
 type controlSnapshot struct {
-	Name         string `json:"name"`
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	Autocomplete string `json:"autocomplete"`
-	Text         string `json:"text"`
-	Selector     string `json:"selector"`
+	Name         string         `json:"name"`
+	ID           string         `json:"id"`
+	Type         string         `json:"type"`
+	Autocomplete string         `json:"autocomplete"`
+	Text         string         `json:"text"`
+	Selector     string         `json:"selector"`
+	Label        string         `json:"label"`
+	Options      []SelectOption `json:"options"`
 }
 
 func formsFromSnapshot(snapshots []formSnapshot) []Form {
 	forms := make([]Form, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		form := Form{Action: snapshot.Action, Method: snapshot.Method}
+		form := Form{Selector: snapshot.Selector, Action: snapshot.Action, Method: snapshot.Method, Controls: []FormControl{}}
 		var username *controlSnapshot
 		var password *controlSnapshot
 		usernamePreferred := false
 		for index := range snapshot.Controls {
 			candidate := &snapshot.Controls[index]
+			if safeMutableControlType(candidate.Type) {
+				form.Controls = append(form.Controls, FormControl{
+					ID: candidate.ID, Name: candidate.Name, Type: candidate.Type,
+					Label: candidate.Label, Autocomplete: candidate.Autocomplete,
+					Selector: candidate.Selector, Options: append([]SelectOption(nil), candidate.Options...),
+				})
+			}
 			if password == nil && candidate.Type == "password" {
 				password = candidate
 			}
@@ -343,6 +398,15 @@ func formsFromSnapshot(snapshots []formSnapshot) []Form {
 	return forms
 }
 
+func safeMutableControlType(controlType string) bool {
+	switch controlType {
+	case "", "text", "email", "number", "date", "datetime-local", "textarea", "select-one", "select-multiple", "select":
+		return true
+	default:
+		return false
+	}
+}
+
 const snapshotScript = `(() => {
   const selector = (element) => {
     if (element.id) return '#' + CSS.escape(element.id);
@@ -363,10 +427,17 @@ const snapshotScript = `(() => {
 		type: (element.type || element.tagName || '').toLowerCase(),
 		autocomplete: element.autocomplete || '',
 		text: ((element.innerText || '').trim()).slice(0, 120),
-		selector: elementSelector
+		selector: elementSelector,
+		label: (() => {
+			if (element.getAttribute('aria-label')) return element.getAttribute('aria-label').slice(0, 120);
+			if (element.labels && element.labels.length) return (element.labels[0].innerText || '').trim().slice(0, 120);
+			return '';
+		})(),
+		options: element.tagName && element.tagName.toLowerCase() === 'select' ?
+			Array.from(element.options).slice(0, 100).map(option => ({value: option.value, text: (option.text || '').trim().slice(0, 120)})) : []
 	}) : null;
   const forms = Array.from(document.forms).slice(0, 20).map(form => {
-    const inputs = Array.from(form.querySelectorAll('input'));
+		const inputs = Array.from(form.querySelectorAll('input,textarea,select'));
     const submit = form.querySelector('button[type=submit], input[type=submit], button:not([type])');
 		const action = form.getAttribute('action') || '';
 		const formSelector = form.id ? '#' + CSS.escape(form.id) :
@@ -379,6 +450,7 @@ const snapshotScript = `(() => {
 			else submitPart = 'button:not([type])';
 		}
     return {
+		  selector: formSelector,
 		  action,
       method: (form.method || 'get').toUpperCase(),
 		  controls: inputs.map(input => control(input, selector(input))),
@@ -392,6 +464,6 @@ const snapshotScript = `(() => {
       text: (element.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 240)
     })).filter(element => element.name || element.text);
   const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 200)
-    .map(link => ({url: link.href, text: (link.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 160)}));
+		.map(link => ({url: link.href, text: (link.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 160), selector: selector(link)}));
   return {forms, elements, links};
 })()`

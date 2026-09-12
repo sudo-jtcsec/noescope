@@ -37,6 +37,15 @@ type Engine interface {
 	Close() error
 }
 
+// MutationEngine is the deliberately small browser capability used by the
+// deterministic Core Test executor. Plans select controls from a live Form;
+// model output never supplies arbitrary selectors or script.
+type MutationEngine interface {
+	Engine
+	SubmitForm(context.Context, FormSubmission) (Page, error)
+	Activate(context.Context, Activation) (Page, error)
+}
+
 type Page struct {
 	RequestedURL      string
 	FinalURL          string
@@ -53,8 +62,10 @@ type Page struct {
 }
 
 type Form struct {
+	Selector             string
 	Action               string
 	Method               string
+	Controls             []FormControl
 	UsernameField        string
 	UsernameID           string
 	UsernameType         string
@@ -70,6 +81,40 @@ type Form struct {
 	SubmitSelector       string
 }
 
+type FormControl struct {
+	ID           string
+	Name         string
+	Type         string
+	Label        string
+	Autocomplete string
+	Selector     string
+	Options      []SelectOption
+}
+
+type SelectOption struct {
+	Value string
+	Text  string
+}
+
+type FormEntry struct {
+	Selector string
+	Type     string
+	Value    string
+}
+
+type FormSubmission struct {
+	PageURL        string
+	FormSelector   string
+	SubmitSelector string
+	Entries        []FormEntry
+}
+
+type Activation struct {
+	PageURL  string
+	Selector string
+	Label    string
+}
+
 type LoginForm struct {
 	PageURL string
 	Form    Form
@@ -82,8 +127,9 @@ type Element struct {
 }
 
 type Link struct {
-	URL  string
-	Text string
+	URL      string
+	Text     string
+	Selector string
 }
 
 type NetworkObservation struct {
