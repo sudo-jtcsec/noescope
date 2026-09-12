@@ -76,7 +76,7 @@ func (s *EvidenceStore) Add(record EvidenceRecord) (EvidenceRecord, error) {
 
 func sensitiveEvidenceAttribute(key string) bool {
 	key = strings.ToLower(key)
-	for _, term := range []string{"password", "token", "secret", "authorization", "cookie", "api_key", "apikey"} {
+	for _, term := range []string{"password", "token", "secret", "authorization", "cookie", "api_key", "apikey", "otp", "totp", "one_time", "one-time"} {
 		if strings.Contains(key, term) {
 			return true
 		}

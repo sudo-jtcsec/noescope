@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -35,6 +36,41 @@ func (i *IdentityConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	*i = IdentityConfig(decoded)
+	if i.TOTP != nil {
+		if !environmentNamePattern.MatchString(i.TOTP.SecretEnv) {
+			return fmt.Errorf("identity %q totp.secret_env must be an environment variable name", i.ID)
+		}
+		if i.TOTP.Period != 0 && (i.TOTP.Period < 5 || i.TOTP.Period > 300) {
+			return fmt.Errorf("identity %q totp.period must be between 5 and 300 seconds", i.ID)
+		}
+		if i.TOTP.Digits != 0 && i.TOTP.Digits != 6 && i.TOTP.Digits != 8 {
+			return fmt.Errorf("identity %q totp.digits must be 6 or 8", i.ID)
+		}
+		algorithm := strings.ToUpper(strings.TrimSpace(i.TOTP.Algorithm))
+		if algorithm != "" && algorithm != "SHA1" && algorithm != "SHA256" && algorithm != "SHA512" {
+			return fmt.Errorf("identity %q totp.algorithm must be SHA1, SHA256, or SHA512", i.ID)
+		}
+		i.TOTP.Algorithm = algorithm
+	}
+	return nil
+}
+
+func (t *TOTPConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("totp configuration must be an object")
+	}
+	for index := 0; index+1 < len(value.Content); index += 2 {
+		switch value.Content[index].Value {
+		case "secret", "seed", "otpauth_uri":
+			return fmt.Errorf("TOTP credentials must use secret_env, not literal %s", value.Content[index].Value)
+		}
+	}
+	type totpAlias TOTPConfig
+	var decoded totpAlias
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*t = TOTPConfig(decoded)
 	return nil
 }
 

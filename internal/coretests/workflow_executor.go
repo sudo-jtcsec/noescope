@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
 	"github.com/sudo-jtcsec/noescope/internal/runtimeverify"
 	"github.com/sudo-jtcsec/noescope/internal/runtimeverify/browser"
@@ -78,8 +79,11 @@ func ExecuteOwnedLifecycle(
 		result.Status, result.Reason = testsmodel.StatusUnresolved, "browser does not support bounded form mutation"
 		return result
 	}
-	if _, err := authenticate(ctx, engine, options.Runtime, options.Credentials); err != nil {
+	if _, err := authenticate(ctx, engine, options.ExecutorOptions); err != nil {
 		result.Status, result.Reason = testsmodel.StatusFailed, err.Error()
+		if authn.IsTOTPRequired(err) {
+			result.Status = testsmodel.StatusBlocked
+		}
 		return result
 	}
 	addEvidence("test_step", "", "Established authenticated workflow precondition", options.Runtime.Authentication.FinalURL, nil)

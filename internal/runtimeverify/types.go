@@ -26,6 +26,7 @@ const (
 	StatusNotAttempted           Status = "not_attempted"
 	StatusUnsafe                 Status = "unsafe"
 	StatusUnknown                Status = "unknown"
+	StatusBlocked                Status = "blocked"
 	StatusContradicted           Status = "contradicted"
 	StatusRequiresRuntimeBinding Status = "requires_runtime_binding"
 )
@@ -86,13 +87,22 @@ type ApplicationObservation struct {
 }
 
 type AuthenticationObservation struct {
-	Attempted   bool     `json:"attempted"`
-	Status      Status   `json:"status"`
-	Identity    string   `json:"identity,omitempty"`
-	LoginURL    string   `json:"login_url,omitempty"`
-	FinalURL    string   `json:"final_url,omitempty"`
-	Reason      string   `json:"reason,omitempty"`
-	EvidenceIDs []string `json:"evidence_ids"`
+	Attempted             bool                     `json:"attempted"`
+	Status                Status                   `json:"status"`
+	Identity              string                   `json:"identity,omitempty"`
+	LoginURL              string                   `json:"login_url,omitempty"`
+	FinalURL              string                   `json:"final_url,omitempty"`
+	Reason                string                   `json:"reason,omitempty"`
+	PrimaryAuthentication Status                   `json:"primary_authentication,omitempty"`
+	SecondFactor          *SecondFactorObservation `json:"second_factor,omitempty"`
+	EvidenceIDs           []string                 `json:"evidence_ids"`
+}
+
+type SecondFactorObservation struct {
+	Type      string `json:"type"`
+	Attempted bool   `json:"attempted"`
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 type InterfaceObservation struct {

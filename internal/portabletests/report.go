@@ -27,12 +27,13 @@ type reportHistory struct {
 }
 
 type reportData struct {
-	Manifest      Manifest
-	Summary       Summary
-	Tests         []reportTest
-	Latest        *Execution
-	Overall       string
-	OverallStatus string
+	Manifest       Manifest
+	Summary        Summary
+	Tests          []reportTest
+	Latest         *Execution
+	Overall        string
+	OverallStatus  string
+	Authentication string
 }
 
 func reportView(bundle *Bundle) reportData {
@@ -74,6 +75,7 @@ func reportView(bundle *Bundle) reportData {
 	data.Summary = summarize(allResults)
 	data.OverallStatus = overallStatus(data.Summary)
 	data.Overall = statusLabel(data.OverallStatus)
+	data.Authentication = authenticationLabel(bundle.Manifest.Identities)
 	return data
 }
 
@@ -123,6 +125,9 @@ func Markdown(bundle *Bundle) []byte {
 	fmt.Fprintf(&out, "- Pack ID: `%s`\n", markdownText(data.Manifest.PackID))
 	fmt.Fprintf(&out, "- Generated: %s\n", data.Manifest.CreatedAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	fmt.Fprintf(&out, "- Default target: `%s`\n", markdownText(data.Manifest.DefaultTarget))
+	if data.Authentication != "" {
+		fmt.Fprintf(&out, "- Authentication: %s\n", markdownText(data.Authentication))
+	}
 	if data.Latest != nil {
 		fmt.Fprintf(&out, "- Most recent run: `%s`\n", markdownText(data.Latest.ExecutionID))
 	}
@@ -248,6 +253,18 @@ func safetyLabel(safety Safety) string {
 	return "Read-only"
 }
 
+func authenticationLabel(identities []IdentityReference) string {
+	if len(identities) == 0 {
+		return ""
+	}
+	for _, identity := range identities {
+		if identity.TOTP != nil {
+			return "Username/password + TOTP"
+		}
+	}
+	return "Username/password"
+}
+
 func stepDescription(step Step) string {
 	switch step.Type {
 	case "navigate":
@@ -320,7 +337,7 @@ const htmlTemplate = `<!doctype html>
 <title>Core Test Pack</title><style>
 :root{font-family:system-ui,sans-serif;color:#172033;background:#f5f7fb}body{margin:0}.wrap{max-width:1180px;margin:auto;padding:28px}h1,h2{color:#101828}.meta,.summary,.test{background:#fff;border:1px solid #dfe4ec;border-radius:10px;padding:18px;margin:14px 0}.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}.card{padding:12px;border-radius:8px;background:#eef2f7}.count{font-size:1.6rem;font-weight:700}.badge{display:inline-block;padding:4px 9px;border-radius:999px;font-weight:700;font-size:.78rem}.passed{background:#d1fadf;color:#05603a}.failed{background:#fee4e2;color:#b42318}.blocked{background:#fef0c7;color:#93370d}.cleanup_failed{background:#fecdca;color:#7a271a}.unresolved,.not_run{background:#eaecf0;color:#344054}.mutating{background:#ffe0b2;color:#8a3b00}.readonly{background:#dbeafe;color:#1e40af}.warning{border:2px solid #d92d20;background:#fff4f2;padding:12px;font-weight:700}code{overflow-wrap:anywhere}ol,ul{line-height:1.55}summary{cursor:pointer}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:9px;border-bottom:1px solid #e4e7ec}
 </style></head><body><main class="wrap"><h1>Core Test Pack</h1>
-<section class="meta"><strong>{{.Manifest.Project}}</strong> · <span class="badge {{.OverallStatus}}">{{.Overall}}</span><br>Source <code>{{.Manifest.SourceCommit}}</code> · Pack <code>{{.Manifest.PackID}}</code><br>Generated {{.Manifest.CreatedAt}} · Default target <code>{{.Manifest.DefaultTarget}}</code>{{if .Latest}}<br>Most recent run <code>{{.Latest.ExecutionID}}</code>{{end}}</section>
+<section class="meta"><strong>{{.Manifest.Project}}</strong> · <span class="badge {{.OverallStatus}}">{{.Overall}}</span><br>Source <code>{{.Manifest.SourceCommit}}</code> · Pack <code>{{.Manifest.PackID}}</code><br>Generated {{.Manifest.CreatedAt}} · Default target <code>{{.Manifest.DefaultTarget}}</code>{{if .Authentication}}<br>Authentication: {{.Authentication}}{{end}}{{if .Latest}}<br>Most recent run <code>{{.Latest.ExecutionID}}</code>{{end}}</section>
 <section class="summary"><div class="card"><div class="count">{{.Summary.Total}}</div>Total</div><div class="card"><div class="count">{{.Summary.Passed}}</div>Passed</div><div class="card"><div class="count">{{.Summary.Failed}}</div>Failed</div><div class="card"><div class="count">{{.Summary.Blocked}}</div>Blocked</div><div class="card"><div class="count">{{.Summary.CleanupFailed}}</div>Cleanup failed</div><div class="card"><div class="count">{{.Summary.Unresolved}}</div>Unresolved</div></section>
 <h2>Tests</h2><table><thead><tr><th>Status</th><th>Name</th><th>ID</th><th>Safety</th><th>Duration</th></tr></thead><tbody>{{range .Tests}}<tr><td><span class="badge {{.Status}}">{{.Label}}</span></td><td>{{.Test.Name}}</td><td><code>{{.Test.ID}}</code></td><td>{{if .Test.Safety.Mutating}}<span class="badge mutating">MUTATING</span>{{else}}<span class="badge readonly">READ-ONLY</span>{{end}}</td><td>{{.Result.DurationMS}} ms</td></tr>{{end}}</tbody></table>
 {{range .Tests}}<details class="test" id="{{.Test.ID}}"><summary><strong>{{.Test.Name}}</strong> · <span class="badge {{.Status}}">{{.Label}}</span></summary><p>{{.Test.Description}}</p>

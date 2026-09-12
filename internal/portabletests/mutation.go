@@ -111,13 +111,13 @@ func (r *Runner) runMutating(
 		return nil
 	}()
 	if workflowErr != nil {
-		result.WorkflowFailure = sanitizeText(workflowErr.Error(), credentialSecrets(credentials)...)
+		result.WorkflowFailure = r.sanitize(workflowErr.Error(), credentials)
 	}
 	cleanupErr := cleanupPortable(ctx, baseURL, test, engine, state)
 	result.OwnedObjects = ownedObjects(state)
 	if cleanupErr != nil {
 		result.Status = StatusCleanupFailed
-		result.CleanupFailure = sanitizeText(cleanupErr.Error(), credentialSecrets(credentials)...)
+		result.CleanupFailure = r.sanitize(cleanupErr.Error(), credentials)
 		result.Reason = result.CleanupFailure
 		if result.WorkflowFailure != "" {
 			result.Reason = result.WorkflowFailure + "; cleanup failed: " + result.CleanupFailure

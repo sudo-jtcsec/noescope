@@ -27,11 +27,17 @@ identities:
   - id: admin
     username_env: NOESCOPE_USERNAME
     password_env: NOESCOPE_PASSWORD
+    totp:
+      secret_env: NOESCOPE_TOTP_SECRET
+      period: 30
+      digits: 6
+      algorithm: sha1
 ai:
   api_key: ${NOESCOPE_TEST_LLM_KEY}
 `
 	t.Setenv("NOESCOPE_USERNAME", "expanded-user")
 	t.Setenv("NOESCOPE_PASSWORD", "expanded-secret")
+	t.Setenv("NOESCOPE_TOTP_SECRET", "expanded-totp-seed")
 	t.Setenv("NOESCOPE_TEST_LLM_KEY", "llm-key")
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatal(err)
@@ -50,8 +56,16 @@ ai:
 		t.Fatal(err)
 	}
 	if identity.UsernameEnv != "NOESCOPE_USERNAME" ||
-		identity.PasswordEnv != "NOESCOPE_PASSWORD" {
+		identity.PasswordEnv != "NOESCOPE_PASSWORD" || identity.TOTP == nil ||
+		identity.TOTP.SecretEnv != "NOESCOPE_TOTP_SECRET" || identity.TOTP.Algorithm != "SHA1" {
 		t.Fatalf("credential references expanded or changed: %#v", identity)
+	}
+	identityJSON, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(identityJSON), "expanded-totp-seed") {
+		t.Fatalf("identity serialization expanded the TOTP seed: %s", identityJSON)
 	}
 	if cfg.AI.APIKey != "llm-key" {
 		t.Fatalf("AI key expansion changed: %q", cfg.AI.APIKey)
@@ -69,6 +83,41 @@ ai:
 	}
 	if strings.Contains(string(serialized), "expanded-user") || strings.Contains(string(serialized), "expanded-secret") {
 		t.Fatalf("runtime credentials are serializable: %s", serialized)
+	}
+}
+
+func TestIdentityWithoutTOTPRemainsOptional(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noescope.yml")
+	if err := os.WriteFile(path, []byte(`identities:
+  - id: admin
+    username_env: USER_ENV
+    password_env: PASSWORD_ENV
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Identities[0].TOTP != nil {
+		t.Fatalf("non-TOTP identity changed: %#v %v", cfg, err)
+	}
+}
+
+func TestTOTPConfigRejectsLiteralSeedAndInvalidParameters(t *testing.T) {
+	values := []string{
+		"totp:\n      secret: literal-seed",
+		"totp:\n      secret_env: invalid-name!",
+		"totp:\n      secret_env: TOTP_SEED\n      period: 1",
+		"totp:\n      secret_env: TOTP_SEED\n      digits: 7",
+		"totp:\n      secret_env: TOTP_SEED\n      algorithm: MD5",
+	}
+	for _, value := range values {
+		path := filepath.Join(t.TempDir(), "noescope.yml")
+		data := "identities:\n  - id: admin\n    username_env: USER_ENV\n    password_env: PASSWORD_ENV\n    " + value + "\n"
+		if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("invalid TOTP configuration was accepted:\n%s", data)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
 	"github.com/sudo-jtcsec/noescope/internal/model"
 	"github.com/sudo-jtcsec/noescope/internal/runtimeverify"
@@ -21,6 +22,9 @@ type ExecutorOptions struct {
 	Application                     *model.Application
 	Runtime                         *runtimeverify.Runtime
 	Credentials                     *browser.Credentials
+	TOTP                            *authn.TOTPReference
+	LookupEnv                       func(string) (string, bool)
+	RegisterSecrets                 func(...string)
 	AuthenticationUnavailableReason string
 	MutationsEnabled                bool
 	Cleanup                         string
@@ -105,9 +109,12 @@ func executeCandidate(
 	authenticated := false
 	var page browser.Page
 	if candidate.Preconditions.Authentication == "authenticated" {
-		page, err = authenticate(ctx, engine, options.Runtime, options.Credentials)
+		page, err = authenticate(ctx, engine, options)
 		if err != nil {
 			result.Status = testsmodel.StatusFailed
+			if authn.IsTOTPRequired(err) {
+				result.Status = testsmodel.StatusBlocked
+			}
 			result.Reason = err.Error()
 			addEvidence("test_execution", "", "Authentication precondition failed: "+err.Error(), "", nil)
 			return result
@@ -174,9 +181,10 @@ func executeCandidate(
 func authenticate(
 	ctx context.Context,
 	engine browser.Engine,
-	runtime *runtimeverify.Runtime,
-	credentials *browser.Credentials,
+	options ExecutorOptions,
 ) (browser.Page, error) {
+	runtime := options.Runtime
+	credentials := options.Credentials
 	if credentials == nil {
 		return browser.Page{}, fmt.Errorf("authenticated precondition requires configured credentials")
 	}
@@ -194,6 +202,14 @@ func authenticate(
 	page, err = engine.SubmitLogin(ctx, login, *credentials)
 	if err != nil {
 		return page, fmt.Errorf("submit login: %w", err)
+	}
+	completed, secondErr := authn.CompleteSecondFactor(ctx, engine, page, authn.Identity{
+		Primary: *credentials, TOTP: options.TOTP, LookupEnv: options.LookupEnv,
+	}, authn.Options{SourceSupportsTOTP: runtime.Authentication.SecondFactor != nil,
+		RegisterSecrets: options.RegisterSecrets})
+	page = completed.Page
+	if secondErr != nil {
+		return page, secondErr
 	}
 	if _, stillLogin := browser.DetectLoginForm(page); stillLogin {
 		return page, fmt.Errorf("authentication failed: login form remained")

@@ -46,6 +46,19 @@ type MutationEngine interface {
 	Activate(context.Context, Activation) (Page, error)
 }
 
+// FormSubmitter is the narrow capability needed by deterministic second-factor
+// authentication. It intentionally exposes only an already-bound native form
+// submission, never arbitrary browser scripting.
+type FormSubmitter interface {
+	SubmitForm(context.Context, FormSubmission) (Page, error)
+}
+
+// SecondFactorEngine performs one bounded live-control entry and uses the
+// form's native submit button, or Enter on that field when no button exists.
+type SecondFactorEngine interface {
+	SubmitOneTimeCode(context.Context, FormSubmission) (Page, error)
+}
+
 type Page struct {
 	RequestedURL      string
 	FinalURL          string

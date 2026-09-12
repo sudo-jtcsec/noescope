@@ -54,7 +54,8 @@ func TestExportCreatesStandaloneRelocatableBundle(t *testing.T) {
 	}
 	output := filepath.Join(t.TempDir(), "bundle")
 	cfg := &config.Config{Project: config.ProjectConfig{Name: "Fixture"}, Testing: config.TestingConfig{Identity: "admin"},
-		Identities: []config.IdentityConfig{{ID: "admin", UsernameEnv: "PORTABLE_USER", PasswordEnv: "PORTABLE_PASSWORD"}}}
+		Identities: []config.IdentityConfig{{ID: "admin", UsernameEnv: "PORTABLE_USER", PasswordEnv: "PORTABLE_PASSWORD",
+			TOTP: &config.TOTPConfig{SecretEnv: "PORTABLE_TOTP", Period: 30, Digits: 6, Algorithm: "SHA1"}}}}
 	result, err := Export(ExportOptions{ProjectRoot: projectRoot, PackID: "pack-1", Output: output, RunnerPath: runner, Config: cfg})
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +78,9 @@ func TestExportCreatesStandaloneRelocatableBundle(t *testing.T) {
 	if loaded.Manifest.Identities[0].UsernameEnv != "PORTABLE_USER" || loaded.Manifest.Identities[0].PasswordEnv != "PORTABLE_PASSWORD" {
 		t.Fatal("identity references missing")
 	}
+	if loaded.Manifest.Identities[0].TOTP == nil || loaded.Manifest.Identities[0].TOTP.SecretEnv != "PORTABLE_TOTP" {
+		t.Fatal("TOTP environment reference missing from portable bundle")
+	}
 	err = filepath.Walk(output, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
@@ -85,7 +89,7 @@ func TestExportCreatesStandaloneRelocatableBundle(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, forbidden := range []string{"actual-user", "actual-password", "ai.base_url", "api_key"} {
+		for _, forbidden := range []string{"actual-user", "actual-password", "ai.base_url", "api_key", "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"} {
 			if strings.Contains(string(raw), forbidden) {
 				t.Fatalf("forbidden value %q in %s", forbidden, path)
 			}

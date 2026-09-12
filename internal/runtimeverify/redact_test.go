@@ -21,6 +21,16 @@ func TestRuntimeRedactionRemovesHeadersTokensURLsAndConfiguredSecrets(t *testing
 	}
 }
 
+func TestRuntimeRedactionRemovesDynamicTOTPAndOTPAuthURI(t *testing.T) {
+	redactor := NewRedactor()
+	redactor.AddSecrets("BASE32SEED", "123456")
+	value := redactor.String("seed=BASE32SEED code=123456 uri=otpauth://totp/App:user?secret=BASE32SEED")
+	if strings.Contains(value, "BASE32SEED") || strings.Contains(value, "123456") ||
+		strings.Contains(strings.ToLower(value), "otpauth://") {
+		t.Fatalf("TOTP material was not redacted: %s", value)
+	}
+}
+
 func TestRuntimeEvidenceNeverPersistsSecrets(t *testing.T) {
 	root := t.TempDir()
 	store := NewEvidenceStore(root, NewRedactor("alice", "super-secret"))

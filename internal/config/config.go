@@ -26,10 +26,20 @@ type ApplicationConfig struct {
 }
 
 type IdentityConfig struct {
-	ID           string `yaml:"id"`
-	ExpectedRole string `yaml:"expected_role"`
-	UsernameEnv  string `yaml:"username_env"`
-	PasswordEnv  string `yaml:"password_env"`
+	ID           string      `yaml:"id"`
+	ExpectedRole string      `yaml:"expected_role"`
+	UsernameEnv  string      `yaml:"username_env"`
+	PasswordEnv  string      `yaml:"password_env"`
+	TOTP         *TOTPConfig `yaml:"totp,omitempty"`
+}
+
+// TOTPConfig contains only a reference to secret material. The Base32 seed is
+// resolved lazily, after a browser has actually observed a TOTP challenge.
+type TOTPConfig struct {
+	SecretEnv string `yaml:"secret_env"`
+	Period    uint   `yaml:"period,omitempty"`
+	Digits    int    `yaml:"digits,omitempty"`
+	Algorithm string `yaml:"algorithm,omitempty"`
 }
 
 type RuntimeConfig struct {

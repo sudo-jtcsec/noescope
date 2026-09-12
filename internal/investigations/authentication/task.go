@@ -46,6 +46,7 @@ var submitSchema = json.RawMessage(`{
                   "oidc",
                   "saml",
                   "api_key",
+                  "totp",
                   "custom"
                 ]
               },
@@ -181,6 +182,7 @@ var mechanismTypes = map[string]struct{}{
 	"oidc":         {},
 	"saml":         {},
 	"api_key":      {},
+	"totp":         {},
 	"custom":       {},
 }
 
@@ -194,6 +196,7 @@ func Task() investigation.Task {
 Determine:
 - whether authentication exists
 - each authentication mechanism in use
+- whether a TOTP/OTP second factor is supported and its source-backed invocation entrypoint
 - login entrypoints
 - credential or input fields, when discoverable
 - session or token representation
@@ -209,7 +212,9 @@ Do not investigate authorization roles, permissions, or access-control policy ex
 
 		Instructions: `Use the previously validated Architecture findings to target likely components and avoid rediscovering basic repository structure.
 
-Search for authentication indicators such as login, logout, session, cookie, token, bearer, password, credential, authentication, auth middleware, and user identity. Inspect only the most relevant routes, handlers, middleware, services, configuration, and client code.
+Search for authentication indicators such as login, logout, session, cookie, token, bearer, password, credential, authentication, auth middleware, user identity, TOTP, authenticator, one-time code, and two-factor. Inspect only the most relevant routes, handlers, middleware, services, configuration, and client code.
+
+Report a source-backed TOTP mechanism when support is present, including its entrypoint, credential field, source components, confidence, and evidence. Source support does not prove that TOTP is mandatory for every identity: do not claim a configured identity is required to use TOTP unless source evidence explicitly establishes that fact. Runtime observation decides whether the selected identity is actually challenged.
 
 When concluding authentication is absent, collect representative evidence for that conclusion. Relevant evidence may include targeted searches showing no runtime authentication implementation, inspection of central configuration and entrypoints, or confirmation that outbound API credentials are client credentials only. Do not try to prove a universal negative by reading every file.
 

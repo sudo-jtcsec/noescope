@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
 	"github.com/sudo-jtcsec/noescope/internal/model"
 	"github.com/sudo-jtcsec/noescope/internal/runtimeverify/browser"
@@ -22,6 +23,8 @@ type VerifyOptions struct {
 	Redactor      *Redactor
 	IdentityID    string
 	Credentials   *browser.Credentials
+	TOTP          *authn.TOTPReference
+	LookupEnv     func(string) (string, bool)
 	MaxInterfaces int
 	Logf          func(string, ...any)
 }
@@ -201,6 +204,13 @@ func Verify(ctx context.Context, options VerifyOptions) (resultErr error) {
 	options.Runtime.Authentication = verifyAuthentication(ctx, options, state, basePage)
 	if options.Logf != nil {
 		options.Logf("[runtime] authentication: %s", options.Runtime.Authentication.Status)
+		if options.Runtime.Authentication.SecondFactor != nil {
+			options.Logf("[runtime] second factor: %s (%s)",
+				options.Runtime.Authentication.SecondFactor.Type, options.Runtime.Authentication.SecondFactor.Status)
+		}
+		if options.Runtime.Authentication.Status == StatusBlocked && options.Runtime.Authentication.Reason != "" {
+			options.Logf("[runtime] authentication blocked: %s", options.Runtime.Authentication.Reason)
+		}
 	}
 	if options.Runtime.Authentication.Status == StatusVerified {
 		state.Authenticated = true
@@ -214,6 +224,9 @@ func Verify(ctx context.Context, options VerifyOptions) (resultErr error) {
 	}
 	options.Runtime.Features = FeatureCoverage(options.Application, options.Runtime.Interfaces)
 	options.Runtime.Status = RunStatusCompleted
+	if options.Runtime.Authentication.Status == StatusBlocked {
+		options.Runtime.Status = RunStatusPartial
+	}
 	if len(options.Runtime.ObservationErrors) > 0 {
 		options.Runtime.Status = RunStatusPartial
 	}
@@ -310,7 +323,12 @@ func verifyAuthentication(
 		result.Reason = options.Redactor.String(err.Error())
 		return result
 	}
-	evidenceIDs, err := recordPageEvidence(options, "", "authenticated", page)
+	challenge, challenged := authn.DetectTOTPChallenge(page, sourceSupportsTOTP(options.Application))
+	postPrimaryState := "authenticated"
+	if challenged {
+		postPrimaryState = "second_factor_challenge"
+	}
+	evidenceIDs, err := recordPageEvidence(options, "", postPrimaryState, page)
 	if err != nil {
 		result.Status = StatusRuntimeError
 		result.Reason = err.Error()
@@ -319,9 +337,56 @@ func verifyAuthentication(
 	result.EvidenceIDs = append(result.EvidenceIDs, evidenceIDs...)
 	result.FinalURL = options.Redactor.URL(page.FinalURL)
 	state.Observe(page, evidenceIDs[0], options.Redactor)
+	if challenged {
+		result.PrimaryAuthentication = StatusVerified
+		challengeEvidence, evidenceErr := options.Evidence.Add(EvidenceRecord{
+			Kind: "dom_observation", Summary: "Detected a deterministic TOTP second-factor challenge; input values were not captured",
+			URL: challenge.PageURL, Attributes: totpFormEvidenceAttributes(challenge),
+		})
+		if evidenceErr != nil {
+			result.Status, result.Reason = StatusRuntimeError, evidenceErr.Error()
+			return result
+		}
+		result.EvidenceIDs = append(result.EvidenceIDs, challengeEvidence.ID)
+		completed, secondErr := authn.CompleteSecondFactor(ctx, options.Browser, page, authn.Identity{
+			Primary: *options.Credentials, TOTP: options.TOTP, LookupEnv: options.LookupEnv,
+		}, authn.Options{SourceSupportsTOTP: sourceSupportsTOTP(options.Application), RegisterSecrets: options.Redactor.AddSecrets})
+		result.SecondFactor = &SecondFactorObservation{
+			Type: completed.SecondFactor.Type, Attempted: completed.SecondFactor.Attempted,
+			Status: completed.SecondFactor.Status, Reason: completed.SecondFactor.Reason,
+		}
+		page = completed.Page
+		result.FinalURL = options.Redactor.URL(page.FinalURL)
+		if secondErr != nil {
+			if completed.SecondFactor.Attempted {
+				postEvidence, evidenceErr := recordPageEvidence(options, "", "second_factor_failed", page)
+				if evidenceErr == nil {
+					result.EvidenceIDs = append(result.EvidenceIDs, postEvidence...)
+					state.Observe(page, postEvidence[0], options.Redactor)
+				}
+			}
+			result.Reason = options.Redactor.String(secondErr.Error())
+			if authn.IsTOTPRequired(secondErr) {
+				result.Status = StatusBlocked
+			} else {
+				result.Status = StatusUnverified
+			}
+			return result
+		}
+		postEvidence, evidenceErr := recordPageEvidence(options, "", "authenticated_second_factor", page)
+		if evidenceErr != nil {
+			result.Status, result.Reason = StatusRuntimeError, evidenceErr.Error()
+			return result
+		}
+		result.EvidenceIDs = append(result.EvidenceIDs, postEvidence...)
+		state.Observe(page, postEvidence[0], options.Redactor)
+	}
 	_, stillLogin := browser.DetectLoginForm(page)
 	if !stillLogin && (differentURL(login.PageURL, page.FinalURL) || len(page.Cookies) > 0 || authenticatedIndicator(page)) {
 		result.Status = StatusVerified
+		if result.PrimaryAuthentication == "" {
+			result.PrimaryAuthentication = StatusVerified
+		}
 		return result
 	}
 	if !stillLogin && hasObservationError(page, "cookies") {
@@ -330,8 +395,42 @@ func verifyAuthentication(
 		return result
 	}
 	result.Status = StatusUnverified
+	if result.PrimaryAuthentication == "" {
+		result.PrimaryAuthentication = StatusUnverified
+	}
 	result.Reason = "login form remained or no authenticated session indicator was observed"
 	return result
+}
+
+func totpFormEvidenceAttributes(challenge authn.TOTPChallenge) map[string]string {
+	values := map[string]string{
+		"action": challenge.Form.Action, "method": challenge.Form.Method,
+		"field_name": challenge.Field.Name, "field_id": challenge.Field.ID,
+		"field_type": challenge.Field.Type, "field_autocomplete": challenge.Field.Autocomplete,
+		"submit_type": challenge.Form.SubmitType, "submit_text": challenge.Form.SubmitLabel,
+	}
+	for key, value := range values {
+		if value == "" {
+			delete(values, key)
+		}
+	}
+	return values
+}
+
+func sourceSupportsTOTP(application *model.Application) bool {
+	if application == nil {
+		return false
+	}
+	for _, mechanism := range application.Identity.Authentication.Mechanisms {
+		semantic := strings.ToLower(mechanism.ID + " " + mechanism.Type + " " +
+			strings.Join(mechanism.CredentialFields, " ") + " " + strings.Join(mechanism.LoginEntrypoints, " "))
+		if strings.Contains(semantic, "totp") || strings.Contains(semantic, "one-time") ||
+			strings.Contains(semantic, "one_time") || strings.Contains(semantic, "two-factor") ||
+			strings.Contains(semantic, "two_factor") || strings.Contains(semantic, "authenticator code") {
+			return true
+		}
+	}
+	return false
 }
 
 func loginFormEvidenceAttributes(form browser.Form) map[string]string {

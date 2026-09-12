@@ -159,6 +159,19 @@ func TestValidateResultAcceptsSupportedAuthentication(t *testing.T) {
 	}
 }
 
+func TestValidateResultAcceptsSourceBackedTOTPSupport(t *testing.T) {
+	mechanism := validMechanism("totp-second-factor", "totp", 0.8, []string{"ev_totp"})
+	mechanism.LoginEntrypoints = []string{"/two-factor/check"}
+	mechanism.CredentialFields = []string{"authentication_code"}
+	result := resultWithFindings(t, Findings{
+		AuthenticationPresent: true, Confidence: 0.9, EvidenceIDs: []string{"ev_login"},
+		Mechanisms: []Mechanism{validMechanism("web-session", "form_session", 0.9, []string{"ev_login"}), mechanism},
+	})
+	if err := validateResult(result, testEvidence{"ev_login": true, "ev_totp": true}); err != nil {
+		t.Fatalf("source-backed TOTP support was rejected: %v", err)
+	}
+}
+
 func TestNormalizedAuthenticationFindingsStillValidate(t *testing.T) {
 	findings := Findings{
 		AuthenticationPresent: false,

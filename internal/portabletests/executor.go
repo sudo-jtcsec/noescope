@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/runtimeverify/browser"
 )
 
@@ -33,6 +34,7 @@ type Runner struct {
 	Bundle   *Bundle
 	Options  RunOptions
 	evidence []Evidence
+	secrets  []string
 }
 
 func (r *Runner) Run(ctx context.Context) (*Execution, string, error) {
@@ -60,6 +62,7 @@ func (r *Runner) Run(ctx context.Context) (*Execution, string, error) {
 		Target: sanitizeURL(baseURL), StartedAt: time.Now().UTC(), Results: []Result{},
 	}
 	r.evidence = []Evidence{}
+	r.secrets = nil
 	for _, test := range tests {
 		execution.SelectedIDs = append(execution.SelectedIDs, test.ID)
 		result := r.runTest(ctx, executionID, baseURL, test)
@@ -114,16 +117,19 @@ func (r *Runner) runTest(ctx context.Context, executionID, baseURL string, test 
 	}
 	engine, err := factory(ctx, browser.Options{Headless: r.Options.Headless, ExecutablePath: r.Options.ExecutablePath})
 	if err != nil {
-		result.Status, result.Reason = StatusFailed, sanitizeText("start browser: "+err.Error(), credentialSecrets(credentials)...)
+		result.Status, result.Reason = StatusFailed, r.sanitize("start browser: "+err.Error(), credentials)
 		return result
 	}
 	defer engine.Close()
 	page := browser.Page{}
 	authenticated := false
 	if test.Preconditions.Authentication == "authenticated" {
-		page, err = r.authenticate(ctx, engine, baseURL, credentials)
+		page, err = r.authenticate(ctx, engine, baseURL, identity, credentials)
 		if err != nil {
-			result.Status, result.Reason = StatusFailed, sanitizeText(err.Error(), credentialSecrets(credentials)...)
+			result.Status, result.Reason = StatusFailed, r.sanitize(err.Error(), credentials)
+			if authn.IsTOTPRequired(err) {
+				result.Status = StatusBlocked
+			}
 			return result
 		}
 		authenticated = true
@@ -154,7 +160,7 @@ func (r *Runner) runTest(ctx context.Context, executionID, baseURL string, test 
 			}
 			page, err = engine.Navigate(ctx, target)
 			if err != nil {
-				result.Status, result.Reason = StatusFailed, sanitizeText("navigate: "+err.Error(), credentialSecrets(credentials)...)
+				result.Status, result.Reason = StatusFailed, r.sanitize("navigate: "+err.Error(), credentials)
 				return result
 			}
 			result.EvidenceIDs = append(result.EvidenceIDs, r.addEvidence(test.ID, "test_step", step.InterfaceID, "Navigated to portable interface", page.FinalURL))
@@ -166,7 +172,7 @@ func (r *Runner) runTest(ctx context.Context, executionID, baseURL string, test 
 	}
 	for _, assertion := range test.Assertions {
 		if err := evaluate(assertion, page, authenticated, baseURL, r.Bundle.Manifest.DefaultTarget); err != nil {
-			result.Status, result.Reason = StatusFailed, sanitizeText(err.Error(), credentialSecrets(credentials)...)
+			result.Status, result.Reason = StatusFailed, r.sanitize(err.Error(), credentials)
 			return result
 		}
 		result.EvidenceIDs = append(result.EvidenceIDs, r.addEvidence(test.ID, "test_assertion", assertion.InterfaceID, "Assertion passed: "+assertion.Type, page.FinalURL))
@@ -178,11 +184,12 @@ func (r *Runner) runTest(ctx context.Context, executionID, baseURL string, test 
 func (r *Runner) addEvidence(testID, kind, interfaceID, description, target string) string {
 	id := "evidence_" + newSuffix()
 	r.evidence = append(r.evidence, Evidence{ID: id, Type: kind, TestID: testID,
-		InterfaceID: interfaceID, Description: description, URL: sanitizeURL(target), CreatedAt: time.Now().UTC()})
+		InterfaceID: interfaceID, Description: r.sanitize(description, browser.Credentials{}),
+		URL: sanitizeURL(r.sanitize(target, browser.Credentials{})), CreatedAt: time.Now().UTC()})
 	return id
 }
 
-func (r *Runner) authenticate(ctx context.Context, engine browser.Engine, baseURL string, credentials browser.Credentials) (browser.Page, error) {
+func (r *Runner) authenticate(ctx context.Context, engine browser.Engine, baseURL string, identity IdentityReference, credentials browser.Credentials) (browser.Page, error) {
 	loginURL, err := resolveURL(baseURL, r.Bundle.Manifest.Authentication.LoginPath, nil)
 	if err != nil {
 		return browser.Page{}, err
@@ -199,10 +206,43 @@ func (r *Runner) authenticate(ctx context.Context, engine browser.Engine, baseUR
 	if err != nil {
 		return page, fmt.Errorf("submit login: %w", err)
 	}
+	var totpReference *authn.TOTPReference
+	if identity.TOTP != nil {
+		totpReference = &authn.TOTPReference{SecretEnv: identity.TOTP.SecretEnv,
+			Period: identity.TOTP.Period, Digits: identity.TOTP.Digits, Algorithm: identity.TOTP.Algorithm}
+	}
+	completed, secondErr := authn.CompleteSecondFactor(ctx, engine, page, authn.Identity{
+		Primary: credentials, TOTP: totpReference, LookupEnv: r.lookupEnv,
+	}, authn.Options{SourceSupportsTOTP: identity.TOTP != nil, RegisterSecrets: r.registerSecrets})
+	page = completed.Page
+	if secondErr != nil {
+		return page, secondErr
+	}
 	if _, stillLogin := browser.DetectLoginForm(page); stillLogin {
 		return page, fmt.Errorf("authentication failed: login form remained")
 	}
 	return page, nil
+}
+
+func (r *Runner) lookupEnv(name string) (string, bool) {
+	lookup := r.Options.LookupEnv
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	return lookup(name)
+}
+
+func (r *Runner) registerSecrets(values ...string) {
+	for _, value := range values {
+		if value != "" {
+			r.secrets = append(r.secrets, value)
+		}
+	}
+}
+
+func (r *Runner) sanitize(value string, credentials browser.Credentials) string {
+	secrets := append(credentialSecrets(credentials), r.secrets...)
+	return sanitizeText(value, secrets...)
 }
 
 func (r *Runner) resolveCredentials(test Test) (IdentityReference, browser.Credentials, error) {
@@ -389,12 +429,31 @@ func credentialSecrets(credentials browser.Credentials) []string {
 }
 
 func sanitizeText(value string, secrets ...string) string {
+	value = redactOTPAuth(value)
 	for _, secret := range secrets {
 		if secret != "" {
 			value = strings.ReplaceAll(value, secret, "[REDACTED]")
 		}
 	}
 	return value
+}
+
+func redactOTPAuth(value string) string {
+	for {
+		lower := strings.ToLower(value)
+		start := strings.Index(lower, "otpauth://")
+		if start < 0 {
+			return value
+		}
+		end := len(value)
+		for index := start; index < len(value); index++ {
+			if strings.ContainsRune(" \t\r\n\"'<>]", rune(value[index])) {
+				end = index
+				break
+			}
+		}
+		value = value[:start] + "[REDACTED]" + value[end:]
+	}
 }
 
 func sanitizeURL(value string) string {
@@ -406,7 +465,7 @@ func sanitizeURL(value string) string {
 	query := parsed.Query()
 	for key := range query {
 		lower := strings.ToLower(key)
-		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "key") || strings.Contains(lower, "auth") {
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "key") || strings.Contains(lower, "auth") || strings.Contains(lower, "otp") {
 			query.Set(key, "[REDACTED]")
 		}
 	}

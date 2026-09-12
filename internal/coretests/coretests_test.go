@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/entities"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/features"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
@@ -212,6 +213,16 @@ type fakeEngine struct {
 	closeErr error
 }
 
+type totpCoreEngine struct {
+	*fakeEngine
+	submissions []browser.FormSubmission
+}
+
+func (f *totpCoreEngine) SubmitForm(_ context.Context, submission browser.FormSubmission) (browser.Page, error) {
+	f.submissions = append(f.submissions, submission)
+	return browser.Page{FinalURL: "https://example.test/", HTTPStatus: 200, Title: "Dashboard", Cookies: []browser.Cookie{{Name: "session"}}}, nil
+}
+
 func (f *fakeEngine) Navigate(_ context.Context, target string) (browser.Page, error) {
 	f.mu.Lock()
 	*f.events = append(*f.events, "navigate:"+target)
@@ -308,6 +319,74 @@ func TestExecutorBlocksMissingAuthenticationBeforeBrowser(t *testing.T) {
 	})
 	if len(results) != 1 || results[0].Status != testsmodel.StatusBlocked || starts != 0 {
 		t.Fatalf("authenticated candidate was not safely blocked: %#v starts=%d", results, starts)
+	}
+}
+
+func TestCoreTestExecutorTransparentlyCompletesTOTP(t *testing.T) {
+	application, runtime := fixtureApplication(), fixtureRuntime()
+	candidates, err := SelectCandidates(application, runtime, SelectionOptions{MaxCandidates: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate testsmodel.TestCase
+	for _, item := range candidates {
+		if item.ID == "project.list.authenticated" {
+			candidate = item
+		}
+	}
+	events := []string{}
+	mu := &sync.Mutex{}
+	challenge := browser.Page{FinalURL: "https://example.test/two-factor", Title: "Two-factor authentication", Forms: []browser.Form{{
+		Selector: "#totp", SubmitSelector: "#totp button", Controls: []browser.FormControl{{
+			ID: "otp", Name: "otp", Type: "text", Autocomplete: "one-time-code", Selector: "#otp",
+		}},
+	}}}
+	fake := &totpCoreEngine{fakeEngine: &fakeEngine{mu: mu, events: &events, pages: map[string]browser.Page{
+		"https://example.test/login": loginPage(), "https://example.test/projects": {FinalURL: "https://example.test/projects", HTTPStatus: 200, Title: "Projects"},
+	}, login: challenge}}
+	evidenceRoot := t.TempDir()
+	redactor := runtimeverify.NewRedactor("admin", "password-secret")
+	results := ExecuteCandidates(context.Background(), []testsmodel.TestCase{candidate}, ExecutorOptions{
+		Application: application, Runtime: runtime,
+		Credentials:     &browser.Credentials{Username: "admin", Password: "password-secret"},
+		TOTP:            &authn.TOTPReference{SecretEnv: "TOTP_SEED"},
+		LookupEnv:       func(name string) (string, bool) { return "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", name == "TOTP_SEED" },
+		RegisterSecrets: redactor.AddSecrets,
+		Evidence:        NewEvidenceStore(evidenceRoot, redactor),
+		BrowserFactory:  func(context.Context) (browser.Engine, error) { return fake, nil },
+	})
+	if len(results) != 1 || results[0].Status != testsmodel.StatusPassed || len(fake.submissions) != 1 {
+		t.Fatalf("Core Test did not transparently complete TOTP: %#v submissions=%#v", results, fake.submissions)
+	}
+	seed := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	code := fake.submissions[0].Entries[0].Value
+	raw, err := os.ReadFile(filepath.Join(evidenceRoot, "evidence.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), seed) || strings.Contains(string(raw), code) {
+		t.Fatalf("Core Test evidence contains TOTP secret material: %s", raw)
+	}
+}
+
+func TestCoreTestExecutorBlocksObservedTOTPWithoutSeed(t *testing.T) {
+	application, runtime := fixtureApplication(), fixtureRuntime()
+	candidates, _ := SelectCandidates(application, runtime, SelectionOptions{MaxCandidates: 20})
+	var candidate testsmodel.TestCase
+	for _, item := range candidates {
+		if item.ID == "project.list.authenticated" {
+			candidate = item
+		}
+	}
+	events := []string{}
+	fake := &fakeEngine{mu: &sync.Mutex{}, events: &events, pages: map[string]browser.Page{"https://example.test/login": loginPage()},
+		login: browser.Page{FinalURL: "https://example.test/two-factor", Title: "Two-factor authentication", Forms: []browser.Form{{Selector: "#totp", SubmitSelector: "button", Controls: []browser.FormControl{{ID: "otp", Name: "otp", Type: "text", Autocomplete: "one-time-code", Selector: "#otp"}}}}}}
+	results := ExecuteCandidates(context.Background(), []testsmodel.TestCase{candidate}, ExecutorOptions{
+		Application: application, Runtime: runtime, Credentials: &browser.Credentials{Username: "admin", Password: "password-secret"},
+		BrowserFactory: func(context.Context) (browser.Engine, error) { return fake, nil },
+	})
+	if len(results) != 1 || results[0].Status != testsmodel.StatusBlocked || !strings.Contains(results[0].Reason, "totp.secret_env") {
+		t.Fatalf("missing TOTP was not blocked: %#v", results)
 	}
 }
 

@@ -16,6 +16,7 @@ var validStatuses = map[Status]struct{}{
 	StatusNotFound: {}, StatusAuthRequired: {}, StatusRedirected: {},
 	StatusRuntimeError: {}, StatusNotAttempted: {}, StatusUnsafe: {},
 	StatusUnknown: {}, StatusContradicted: {}, StatusRequiresRuntimeBinding: {},
+	StatusBlocked: {},
 }
 
 var validRunStatuses = map[RunStatus]struct{}{
@@ -58,6 +59,22 @@ func ValidateRuntime(
 	}
 	if err := validateStatus("authentication", runtime.Authentication.Status); err != nil {
 		return err
+	}
+	if runtime.Authentication.PrimaryAuthentication != "" {
+		if err := validateStatus("authentication.primary_authentication", runtime.Authentication.PrimaryAuthentication); err != nil {
+			return err
+		}
+	}
+	if second := runtime.Authentication.SecondFactor; second != nil {
+		if second.Type != "totp" {
+			return fmt.Errorf("authentication second factor has unsupported type %q", second.Type)
+		}
+		validSecondFactor := map[string]struct{}{
+			"not_required": {}, "required": {}, "verified": {}, "failed": {}, "blocked": {}, "unknown": {},
+		}
+		if _, ok := validSecondFactor[second.Status]; !ok {
+			return fmt.Errorf("authentication second factor has invalid status %q", second.Status)
+		}
 	}
 	if err := validateEvidence(runtime.Application.EvidenceIDs, evidence); err != nil {
 		return fmt.Errorf("application observation: %w", err)

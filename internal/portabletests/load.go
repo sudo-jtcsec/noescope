@@ -15,6 +15,7 @@ import (
 )
 
 var portableID = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
+var portableEnvironmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Bundle struct {
 	Root     string
@@ -42,6 +43,26 @@ func Load(root string) (*Bundle, error) {
 	}
 	if manifest.TestCount != len(manifest.TestIDs) {
 		return nil, fmt.Errorf("bundle manifest test count does not match test IDs")
+	}
+	for _, identity := range manifest.Identities {
+		if !portableEnvironmentName.MatchString(identity.UsernameEnv) || !portableEnvironmentName.MatchString(identity.PasswordEnv) {
+			return nil, fmt.Errorf("bundle identity %q has invalid credential environment references", identity.ID)
+		}
+		if identity.TOTP != nil {
+			if !portableEnvironmentName.MatchString(identity.TOTP.SecretEnv) {
+				return nil, fmt.Errorf("bundle identity %q has invalid TOTP environment reference", identity.ID)
+			}
+			if identity.TOTP.Period != 0 && (identity.TOTP.Period < 5 || identity.TOTP.Period > 300) {
+				return nil, fmt.Errorf("bundle identity %q has invalid TOTP period", identity.ID)
+			}
+			if identity.TOTP.Digits != 0 && identity.TOTP.Digits != 6 && identity.TOTP.Digits != 8 {
+				return nil, fmt.Errorf("bundle identity %q has invalid TOTP digits", identity.ID)
+			}
+			algorithm := strings.ToUpper(identity.TOTP.Algorithm)
+			if algorithm != "" && algorithm != "SHA1" && algorithm != "SHA256" && algorithm != "SHA512" {
+				return nil, fmt.Errorf("bundle identity %q has invalid TOTP algorithm", identity.ID)
+			}
+		}
 	}
 	if err := verifyRequiredFiles(root, manifest); err != nil {
 		return nil, err
@@ -167,7 +188,7 @@ func LoadEvidence(root string) ([]Evidence, error) {
 }
 
 func sensitivePortableKey(key string) bool {
-	for _, term := range []string{"password", "token", "secret", "authorization", "cookie", "api_key", "apikey"} {
+	for _, term := range []string{"password", "token", "secret", "authorization", "cookie", "api_key", "apikey", "otp", "totp", "one_time", "one-time"} {
 		if strings.Contains(key, term) {
 			return true
 		}

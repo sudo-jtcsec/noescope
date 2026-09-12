@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/config"
 	"github.com/sudo-jtcsec/noescope/internal/coretests"
 	"github.com/sudo-jtcsec/noescope/internal/repository"
@@ -93,6 +94,7 @@ func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID, testID string)
 		)
 	}
 	var credentials *browser.Credentials
+	var totpReference *authn.TOTPReference
 	var authenticationUnavailableReason string
 	redactor := runtimeverify.NewRedactor()
 	if cfg.Testing.Identity == "" {
@@ -108,6 +110,10 @@ func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID, testID string)
 		} else {
 			credentials = &browser.Credentials{Username: resolved.Username, Password: resolved.Password}
 			redactor = runtimeverify.NewRedactor(resolved.Username, resolved.Password)
+			if identity.TOTP != nil {
+				totpReference = &authn.TOTPReference{SecretEnv: identity.TOTP.SecretEnv,
+					Period: identity.TOTP.Period, Digits: identity.TOTP.Digits, Algorithm: identity.TOTP.Algorithm}
+			}
 		}
 	}
 
@@ -171,6 +177,7 @@ func runCoreTests(ctx context.Context, sourceRunID, runtimeRunID, testID string)
 	executorOptions := coretests.ExecutorOptions{
 		Application: source.Application, Runtime: loadedRuntime.Runtime,
 		Credentials: credentials, MutationsEnabled: cfg.Testing.Mutations.Enabled,
+		TOTP: totpReference, LookupEnv: os.LookupEnv, RegisterSecrets: redactor.AddSecrets,
 		AuthenticationUnavailableReason: authenticationUnavailableReason,
 		Cleanup:                         cfg.Testing.Cleanup, Evidence: evidenceStore,
 		BrowserFactory: func(ctx context.Context) (browser.Engine, error) {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/authentication"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/features"
 	"github.com/sudo-jtcsec/noescope/internal/investigations/surface"
@@ -22,6 +23,38 @@ type fakeBrowser struct {
 	loginWorks bool
 	navigated  []string
 	closed     bool
+}
+
+type totpRuntimeBrowser struct {
+	fakeBrowser
+	submissions []browser.FormSubmission
+	reject      bool
+}
+
+func (f *totpRuntimeBrowser) SubmitLogin(_ context.Context, _ browser.LoginForm, credentials browser.Credentials) (browser.Page, error) {
+	if credentials.Username != "alice" || credentials.Password != "super-secret" {
+		return loginPage("https://app.example/login"), nil
+	}
+	return runtimeTOTPPage(), nil
+}
+
+func (f *totpRuntimeBrowser) SubmitForm(_ context.Context, submission browser.FormSubmission) (browser.Page, error) {
+	f.submissions = append(f.submissions, submission)
+	if f.reject {
+		return runtimeTOTPPage(), nil
+	}
+	f.loggedIn = true
+	return browser.Page{FinalURL: "https://app.example/dashboard", HTTPStatus: 200, Ready: true,
+		Title: "Dashboard for alice", Elements: []browser.Element{{Role: "link", Text: "Logout"}},
+		Cookies: []browser.Cookie{{Name: "session", HTTPOnly: true}}}, nil
+}
+
+func runtimeTOTPPage() browser.Page {
+	return browser.Page{FinalURL: "https://app.example/two-factor", HTTPStatus: 200, Ready: true,
+		Title: "Two-factor authentication", Forms: []browser.Form{{Selector: "#totp-form", Action: "/two-factor/check", Method: "POST",
+			SubmitSelector: "#totp-form button[type=\"submit\"]", SubmitLabel: "Verify",
+			Controls: []browser.FormControl{{ID: "form-code", Name: "code", Type: "text", Label: "Authentication code",
+				Autocomplete: "one-time-code", Selector: "#form-code"}}}}}
 }
 
 func (f *fakeBrowser) Navigate(_ context.Context, target string) (browser.Page, error) {
@@ -148,6 +181,131 @@ func TestVerifyReachabilityLoginReadOnlyInterfacesRedirectAndBinding(t *testing.
 		if strings.Contains(string(raw), "alice") || strings.Contains(string(raw), "super-secret") {
 			t.Fatalf("runtime artifact %s contains credentials", path)
 		}
+	}
+}
+
+func TestVerifyAuthenticationCompletesObservedTOTPChallenge(t *testing.T) {
+	application := runtimeApplicationFixture()
+	session, err := NewSession(t.TempDir(), application, "https://app.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	redactor := NewRedactor("alice", "super-secret")
+	fake := &totpRuntimeBrowser{fakeBrowser: fakeBrowser{loginWorks: true}}
+	err = Verify(context.Background(), VerifyOptions{
+		Application: application, Runtime: session.Runtime, RuntimeRoot: session.Root,
+		Browser: fake, Evidence: NewEvidenceStore(session.Root, redactor), Redactor: redactor,
+		IdentityID: "admin", Credentials: &browser.Credentials{Username: "alice", Password: "super-secret"},
+		TOTP: &authn.TOTPReference{SecretEnv: "FIXTURE_TOTP"}, LookupEnv: func(name string) (string, bool) { return seed, name == "FIXTURE_TOTP" },
+		MaxInterfaces: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := session.Runtime.Authentication
+	if authentication.Status != StatusVerified || authentication.PrimaryAuthentication != StatusVerified ||
+		authentication.SecondFactor == nil || authentication.SecondFactor.Status != authn.SecondFactorVerified ||
+		len(fake.submissions) != 1 || len(fake.submissions[0].Entries) != 1 {
+		t.Fatalf("TOTP authentication was not verified: %#v submissions=%#v", authentication, fake.submissions)
+	}
+	code := fake.submissions[0].Entries[0].Value
+	raw, err := json.Marshal(session.Runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), seed) || strings.Contains(string(raw), code) || strings.Contains(string(raw), "alice") {
+		t.Fatalf("runtime model persisted authentication secret material: %s", raw)
+	}
+	if _, _, err := session.Write(); err != nil {
+		t.Fatal(err)
+	}
+	err = filepath.Walk(session.Root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		artifact, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(artifact), seed) || strings.Contains(string(artifact), code) {
+			t.Fatalf("runtime artifact contains TOTP secret material: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyAuthenticationBlocksOnlyAfterObservedTOTPMissingSeed(t *testing.T) {
+	application := runtimeApplicationFixture()
+	session, err := NewSession(t.TempDir(), application, "https://app.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactor := NewRedactor("alice", "super-secret")
+	fake := &totpRuntimeBrowser{fakeBrowser: fakeBrowser{loginWorks: true}}
+	err = Verify(context.Background(), VerifyOptions{
+		Application: application, Runtime: session.Runtime, RuntimeRoot: session.Root,
+		Browser: fake, Evidence: NewEvidenceStore(session.Root, redactor), Redactor: redactor,
+		IdentityID: "admin", Credentials: &browser.Credentials{Username: "alice", Password: "super-secret"}, MaxInterfaces: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Runtime.Authentication.Status != StatusBlocked ||
+		!strings.Contains(session.Runtime.Authentication.Reason, "totp.secret_env") || len(fake.submissions) != 0 {
+		t.Fatalf("missing TOTP reference was not safely blocked: %#v", session.Runtime.Authentication)
+	}
+}
+
+func TestVerifyAuthenticationSeparatesPrimaryAndRejectedTOTP(t *testing.T) {
+	application := runtimeApplicationFixture()
+	session, err := NewSession(t.TempDir(), application, "https://app.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactor := NewRedactor("alice", "super-secret")
+	fake := &totpRuntimeBrowser{fakeBrowser: fakeBrowser{loginWorks: true}, reject: true}
+	err = Verify(context.Background(), VerifyOptions{
+		Application: application, Runtime: session.Runtime, RuntimeRoot: session.Root,
+		Browser: fake, Evidence: NewEvidenceStore(session.Root, redactor), Redactor: redactor,
+		IdentityID: "admin", Credentials: &browser.Credentials{Username: "alice", Password: "super-secret"},
+		TOTP: &authn.TOTPReference{SecretEnv: "TOTP_SEED"}, LookupEnv: func(string) (string, bool) { return "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", true },
+		MaxInterfaces: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := session.Runtime.Authentication
+	if got.Status != StatusUnverified || got.PrimaryAuthentication != StatusVerified || got.SecondFactor == nil ||
+		got.SecondFactor.Status != authn.SecondFactorFailed || len(fake.submissions) != 1 {
+		t.Fatalf("primary and second factor failure were conflated: %#v", got)
+	}
+}
+
+func TestPrimaryAuthenticationFailureNeverAttemptsTOTP(t *testing.T) {
+	application := runtimeApplicationFixture()
+	session, err := NewSession(t.TempDir(), application, "https://app.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	redactor := NewRedactor("wrong", "wrong")
+	fake := &totpRuntimeBrowser{fakeBrowser: fakeBrowser{}}
+	lookups := 0
+	err = Verify(context.Background(), VerifyOptions{
+		Application: application, Runtime: session.Runtime, RuntimeRoot: session.Root,
+		Browser: fake, Evidence: NewEvidenceStore(session.Root, redactor), Redactor: redactor,
+		IdentityID: "admin", Credentials: &browser.Credentials{Username: "wrong", Password: "wrong"},
+		TOTP: &authn.TOTPReference{SecretEnv: "TOTP_SEED"}, LookupEnv: func(string) (string, bool) { lookups++; return "seed", true },
+		MaxInterfaces: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Runtime.Authentication.Status != StatusUnverified || lookups != 0 || len(fake.submissions) != 0 {
+		t.Fatalf("TOTP was attempted after primary failure: %#v lookups=%d", session.Runtime.Authentication, lookups)
 	}
 }
 

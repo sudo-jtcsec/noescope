@@ -95,8 +95,10 @@ func writeFixtureBundle(t *testing.T, root string) *Bundle {
 }
 
 type portableFakeBrowser struct {
-	mu     sync.Mutex
-	events []string
+	mu          sync.Mutex
+	events      []string
+	loginResult *browser.Page
+	submissions []browser.FormSubmission
 }
 
 func (f *portableFakeBrowser) Navigate(_ context.Context, target string) (browser.Page, error) {
@@ -116,7 +118,17 @@ func (f *portableFakeBrowser) SubmitLogin(_ context.Context, _ browser.LoginForm
 	f.mu.Lock()
 	f.events = append(f.events, "login")
 	f.mu.Unlock()
-	return browser.Page{FinalURL: "https://example.test/", HTTPStatus: 200, Title: "Home"}, nil
+	if f.loginResult != nil {
+		return *f.loginResult, nil
+	}
+	return browser.Page{FinalURL: "https://example.test/", HTTPStatus: 200, Title: "Home", Cookies: []browser.Cookie{{Name: "session"}}}, nil
+}
+func (f *portableFakeBrowser) SubmitForm(_ context.Context, submission browser.FormSubmission) (browser.Page, error) {
+	f.mu.Lock()
+	f.submissions = append(f.submissions, submission)
+	f.events = append(f.events, "totp")
+	f.mu.Unlock()
+	return browser.Page{FinalURL: "https://example.test/", HTTPStatus: 200, Title: "Home", Cookies: []browser.Cookie{{Name: "session"}}}, nil
 }
 func (f *portableFakeBrowser) Screenshot(context.Context, string) error { return nil }
 func (f *portableFakeBrowser) Close() error                             { return nil }
@@ -202,6 +214,83 @@ func TestRunnerSingleTestHistoryAndTargetOverride(t *testing.T) {
 	}
 	if !containsEvent(fake.events, "navigate:https://override.test/login") {
 		t.Fatalf("target override not used: %#v", fake.events)
+	}
+}
+
+func TestPortableRunnerTransparentlyCompletesTOTPWithoutPersistingSecrets(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureBundle(t, root)
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Manifest.Identities[0].TOTP = &TOTPReference{SecretEnv: "NOESCOPE_TOTP_SECRET"}
+	challenge := browser.Page{FinalURL: "https://example.test/two-factor", Title: "Two-factor authentication", Forms: []browser.Form{{
+		Selector: "#totp", SubmitSelector: "#totp button", Controls: []browser.FormControl{{
+			ID: "form-code", Name: "code", Type: "text", Label: "Authentication code", Autocomplete: "one-time-code", Selector: "#form-code",
+		}},
+	}}}
+	fake := &portableFakeBrowser{loginResult: &challenge}
+	seed := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	runner := Runner{Bundle: loaded, Options: RunOptions{SelectedTestID: "dashboard.show.authenticated", BrowserFactory: fakeFactory(fake),
+		LookupEnv: func(name string) (string, bool) {
+			values := map[string]string{"FIXTURE_USERNAME": "sensitive-user", "FIXTURE_PASSWORD": "sensitive-password", "NOESCOPE_TOTP_SECRET": seed}
+			value, ok := values[name]
+			return value, ok
+		}}}
+	execution, executionRoot, err := runner.Run(context.Background())
+	if err != nil || execution.Summary.Passed != 1 || len(fake.submissions) != 1 || len(fake.submissions[0].Entries) != 1 {
+		t.Fatalf("portable TOTP execution failed: %#v %#v %v", execution, fake.submissions, err)
+	}
+	code := fake.submissions[0].Entries[0].Value
+	err = filepath.Walk(executionRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(raw), seed) || strings.Contains(string(raw), code) {
+			t.Fatalf("portable artifact contains TOTP secret material: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPortableRunnerBlocksObservedTOTPWhenEnvironmentIsMissing(t *testing.T) {
+	bundle := portableFixture()
+	bundle.Root = t.TempDir()
+	bundle.Manifest.Identities[0].TOTP = &TOTPReference{SecretEnv: "NOESCOPE_TOTP_SECRET"}
+	challenge := browser.Page{FinalURL: "https://example.test/two-factor", Title: "Two-factor authentication", Forms: []browser.Form{{
+		Selector: "#totp", SubmitSelector: "button", Controls: []browser.FormControl{{Name: "otp", Type: "text", Autocomplete: "one-time-code", Selector: "input[name=otp]"}},
+	}}}
+	fake := &portableFakeBrowser{loginResult: &challenge}
+	runner := Runner{Bundle: bundle, Options: RunOptions{SelectedTestID: "dashboard.show.authenticated", BrowserFactory: fakeFactory(fake),
+		LookupEnv: func(name string) (string, bool) {
+			if name == "FIXTURE_USERNAME" {
+				return "user", true
+			}
+			if name == "FIXTURE_PASSWORD" {
+				return "password", true
+			}
+			return "", false
+		}}}
+	execution, _, err := runner.Run(context.Background())
+	if err != nil || execution.Results[0].Status != StatusBlocked || !strings.Contains(execution.Results[0].Reason, "NOESCOPE_TOTP_SECRET") {
+		t.Fatalf("missing portable TOTP seed was not blocked: %#v %v", execution, err)
+	}
+	for _, name := range []string{"report.html", "report.md"} {
+		raw, readErr := os.ReadFile(filepath.Join(bundle.Root, name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !strings.Contains(string(raw), "NOESCOPE_TOTP_SECRET") || strings.Contains(string(raw), "otpauth://") {
+			t.Fatalf("portable report did not safely render missing TOTP configuration: %s", name)
+		}
 	}
 }
 

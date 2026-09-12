@@ -34,9 +34,17 @@ type Manifest struct {
 }
 
 type IdentityReference struct {
-	ID          string `json:"id"`
-	UsernameEnv string `json:"username_env"`
-	PasswordEnv string `json:"password_env"`
+	ID          string         `json:"id"`
+	UsernameEnv string         `json:"username_env"`
+	PasswordEnv string         `json:"password_env"`
+	TOTP        *TOTPReference `json:"totp,omitempty"`
+}
+
+type TOTPReference struct {
+	SecretEnv string `json:"secret_env"`
+	Period    uint   `json:"period,omitempty"`
+	Digits    int    `json:"digits,omitempty"`
+	Algorithm string `json:"algorithm,omitempty"`
 }
 
 type Authentication struct {

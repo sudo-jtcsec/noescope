@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sudo-jtcsec/noescope/internal/authn"
 	"github.com/sudo-jtcsec/noescope/internal/config"
 	"github.com/sudo-jtcsec/noescope/internal/repository"
 	"github.com/sudo-jtcsec/noescope/internal/runtimeverify"
@@ -55,6 +56,7 @@ func verifyCommand() *cobra.Command {
 			}
 
 			var credentials *browser.Credentials
+			var totpReference *authn.TOTPReference
 			secrets := make([]string, 0, 2)
 			if cfg.Runtime.Identity != "" {
 				identity, err := cfg.Identity(cfg.Runtime.Identity)
@@ -67,6 +69,10 @@ func verifyCommand() *cobra.Command {
 				}
 				credentials = &browser.Credentials{
 					Username: resolved.Username, Password: resolved.Password,
+				}
+				if identity.TOTP != nil {
+					totpReference = &authn.TOTPReference{SecretEnv: identity.TOTP.SecretEnv,
+						Period: identity.TOTP.Period, Digits: identity.TOTP.Digits, Algorithm: identity.TOTP.Algorithm}
 				}
 				secrets = append(secrets, resolved.Username, resolved.Password)
 			}
@@ -129,6 +135,7 @@ func verifyCommand() *cobra.Command {
 				RuntimeRoot: session.Root, Browser: browserEngine,
 				Evidence: evidenceStore, Redactor: redactor,
 				IdentityID: cfg.Runtime.Identity, Credentials: credentials,
+				TOTP: totpReference, LookupEnv: os.LookupEnv,
 				MaxInterfaces: maxInterfaces,
 				Logf:          func(format string, args ...any) { fmt.Printf(format+"\n", args...) },
 			})

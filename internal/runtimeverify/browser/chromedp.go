@@ -142,6 +142,29 @@ func (c *Chrome) SubmitForm(_ context.Context, submission FormSubmission) (Page,
 	return page, err
 }
 
+func (c *Chrome) SubmitOneTimeCode(_ context.Context, submission FormSubmission) (Page, error) {
+	if len(submission.Entries) != 1 || submission.Entries[0].Selector == "" {
+		return Page{RequestedURL: submission.PageURL}, fmt.Errorf("submit one-time code: exactly one bound control is required")
+	}
+	c.reset(submission.PageURL)
+	entry := submission.Entries[0]
+	actions := liveControlEntryActions(entry.Selector, entry.Value)
+	if submission.SubmitSelector != "" {
+		actions = append(actions, chromedp.Click(submission.SubmitSelector, chromedp.ByQuery))
+	} else {
+		actions = append(actions, chromedp.SendKeys(entry.Selector, kb.Enter, chromedp.ByQuery))
+	}
+	if _, err := chromedp.RunResponse(c.targetCtx, actions...); err != nil {
+		return Page{RequestedURL: submission.PageURL}, fmt.Errorf("submit one-time code: %w", err)
+	}
+	readyErr := chromedp.Run(c.targetCtx, chromedp.WaitReady("body", chromedp.ByQuery))
+	page, err := c.observe(c.targetCtx, submission.PageURL)
+	if readyErr != nil {
+		page.ObservationErrors = append(page.ObservationErrors, BrowserObservationError{Operation: "document ready", Err: readyErr})
+	}
+	return page, err
+}
+
 func (c *Chrome) Activate(_ context.Context, activation Activation) (Page, error) {
 	if activation.Selector == "" {
 		return Page{RequestedURL: activation.PageURL}, fmt.Errorf("activate control: empty selector")
@@ -409,8 +432,15 @@ func safeMutableControlType(controlType string) bool {
 
 const snapshotScript = `(() => {
   const selector = (element) => {
-    if (element.id) return '#' + CSS.escape(element.id);
-    if (element.name) return element.tagName.toLowerCase() + '[name=' + JSON.stringify(element.name) + ']';
+    if (element.id) {
+      const byID = '#' + CSS.escape(element.id);
+      if (document.querySelectorAll(byID).length === 1) return byID;
+    }
+    if (element.name) {
+      const byName = element.tagName.toLowerCase() + '[name=' + JSON.stringify(element.name) + ']';
+      const owner = element.closest('form');
+      if ((owner || document).querySelectorAll(byName).length === 1) return byName;
+    }
     const parts = [];
     while (element && element.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
       let part = element.tagName.toLowerCase();

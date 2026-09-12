@@ -77,8 +77,13 @@ func Export(options ExportOptions) (*Result, error) {
 	identities := []portabletests.IdentityReference{}
 	for _, identity := range options.Config.Identities {
 		if identity.ID == options.Config.Testing.Identity {
-			identities = append(identities, portabletests.IdentityReference{ID: identity.ID,
-				UsernameEnv: identity.UsernameEnv, PasswordEnv: identity.PasswordEnv})
+			reference := portabletests.IdentityReference{ID: identity.ID,
+				UsernameEnv: identity.UsernameEnv, PasswordEnv: identity.PasswordEnv}
+			if identity.TOTP != nil {
+				reference.TOTP = &portabletests.TOTPReference{SecretEnv: identity.TOTP.SecretEnv,
+					Period: identity.TOTP.Period, Digits: identity.TOTP.Digits, Algorithm: identity.TOTP.Algorithm}
+			}
+			identities = append(identities, reference)
 		}
 	}
 	if len(identities) == 0 {
@@ -408,7 +413,7 @@ func scrubEvidenceMap(values map[string]any) {
 }
 
 func sensitiveKey(key string) bool {
-	for _, term := range []string{"password", "token", "secret", "authorization", "cookie", "api_key", "apikey"} {
+	for _, term := range []string{"password", "token", "secret", "authorization", "cookie", "api_key", "apikey", "otp", "totp", "one_time", "one-time"} {
 		if strings.Contains(key, term) {
 			return true
 		}
@@ -433,6 +438,13 @@ func scrubURL(value string) string {
 }
 
 func readme(manifest portabletests.Manifest) []byte {
+	totpNote := ""
+	for _, identity := range manifest.Identities {
+		if identity.TOTP != nil {
+			totpNote = fmt.Sprintf(" If a TOTP challenge is observed, set %s in the runner environment.", identity.TOTP.SecretEnv)
+			break
+		}
+	}
 	return []byte(fmt.Sprintf(`# Portable Core Test Pack
 
 This directory is self-contained. It does not require Noescope, source discovery artifacts, or an LLM.
@@ -448,8 +460,8 @@ Commands:
     ./runner test --base-url https://staging.example.com
     ./runner serve
 
-Credentials are resolved only at execution time from the environment-variable names in testpack.json. Mutating tests are disabled unless the runner is invoked with --mutations. When all tests are run, blocked mutating tests do not fail an otherwise passing read-only CI run. An explicitly selected blocked test returns a non-zero exit code.
-`, manifest.DefaultTarget))
+Credentials are resolved only at execution time from the environment-variable names in testpack.json.%s Mutating tests are disabled unless the runner is invoked with --mutations. When all tests are run, blocked mutating tests do not fail an otherwise passing read-only CI run. An explicitly selected blocked test returns a non-zero exit code.
+`, manifest.DefaultTarget, totpNote))
 }
 
 func readJSON(path string, value any) error {

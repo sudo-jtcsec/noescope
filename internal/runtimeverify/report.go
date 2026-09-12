@@ -19,6 +19,16 @@ func Markdown(runtime *Runtime) []byte {
 	fmt.Fprintf(&out, "\n- Runtime status: `%s`\n", runtime.Status)
 	fmt.Fprintf(&out, "\n- Application reachable: %s\n", yesNo(runtime.Application.Reachable))
 	fmt.Fprintf(&out, "- Authentication: `%s`\n", runtime.Authentication.Status)
+	if runtime.Authentication.PrimaryAuthentication != "" {
+		fmt.Fprintf(&out, "- Primary authentication: `%s`\n", runtime.Authentication.PrimaryAuthentication)
+	}
+	if runtime.Authentication.SecondFactor != nil {
+		fmt.Fprintf(&out, "- Second factor: `%s` (`%s`)\n",
+			inline(runtime.Authentication.SecondFactor.Type), inline(runtime.Authentication.SecondFactor.Status))
+	}
+	if runtime.Authentication.Reason != "" {
+		fmt.Fprintf(&out, "- Authentication detail: %s\n", inline(runtime.Authentication.Reason))
+	}
 	fmt.Fprintf(&out, "- Unique source interfaces selected: %d\n", summary.SelectedInterfaces)
 	fmt.Fprintf(&out, "- State-scoped observations: %d\n", summary.Observations)
 	fmt.Fprintf(&out, "- Verified observations: %d\n", summary.Verified)
